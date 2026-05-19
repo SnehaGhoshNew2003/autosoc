@@ -1,0 +1,119 @@
+# -----------------------
+# Byte-compiled / cache
+# -----------------------
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+eggs/
+parts/
+var/
+*.log
+
+# -----------------------
+# Virtual environments
+# -----------------------
+venv/
+env/
+.venv/
+.env/
+ENV/
+env.bak/
+venv.bak/
+myenv/
+assets/
+
+# -----------------------
+# IDEs & editors
+# -----------------------
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+*.code-workspace
+*.swp
+*.bak
+*.tmp
+
+# -----------------------
+# OS files
+# -----------------------
+.DS_Store
+Thumbs.db
+desktop.ini
+ehthumbs.db
+
+# -----------------------
+# Python-specific
+# -----------------------
+pip-log.txt
+pip-delete-this-directory.txt
+htmlcov/
+.tox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+.hypothesis/
+
+# -----------------------
+# Jupyter Notebooks
+# -----------------------
+.ipynb_checkpoints
+*.ipynb
+
+# -----------------------
+# Environment variables
+# -----------------------
+.env
+.env.local
+.env.*.local
+
+# -----------------------
+# Logs and temporary files
+# -----------------------
+*.log
+*.out
+*.pid
+*.seed
+*.tmp
+
+# -----------------------
+# Distribution / packaging
+# -----------------------
+*.tar.gz
+*.whl
+*.egg-info/
+dist/
+build/
+
+# -----------------------
+# PyInstaller
+# -----------------------
+*.manifest
+*.spec
+
+# -----------------------
+# MyPy
+# -----------------------
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# -----------------------
+# VSCode settings
+# -----------------------
+.vscode/
+
+# -----------------------
+# Local secrets
+# -----------------------
+*.pem
+*.key
+*.crt
