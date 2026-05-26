@@ -13,7 +13,7 @@ def get_llm(temperature: float = 0.2) -> LLM:
     Pull model + key from .env so you change it in one place.
     """
     return LLM(
-        model=os.getenv("GEMINI_MODEL", "gemini/gemini-2.0-flash"),
+        model=os.getenv("GEMINI_MODEL", "gemini/gemini-2.5-pro"),
         api_key=os.getenv("GEMINI_API_KEY"),
         temperature=temperature,
     )
