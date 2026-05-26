@@ -1,29 +1,27 @@
 import logging
-from typing import List, Optional
+import asyncio
+from typing import List
 from pydantic import BaseModel, Field
 from crewai import Agent, Task, Crew
-from agents.base_agent import get_llm
+from agents.base_agent import BaseAgent         
 
 logger = logging.getLogger(__name__)
 
-
-# ── Pydantic output schema ──────────────────────────────────────────────── #
-
 class ThreatActor(BaseModel):
-    name: str
-    confidence: str          # high | medium | low
-    aliases: List[str] = []
+    name:       str       = ""
+    confidence: str       = "low"   
+    aliases:    List[str] = []
 
 class TTP(BaseModel):
-    technique_id: str        # T1059.001
-    technique_name: str
-    tactic: str
-    evidence: str
+    technique_id:   str = ""
+    technique_name: str = ""
+    tactic:         str = ""
+    evidence:       str = ""
 
 class CVE(BaseModel):
-    cve_id: str
-    severity: str            # critical | high | medium | low
-    description: str
+    cve_id:      str = ""
+    severity:    str = "unknown" 
+    description: str = ""
 
 class IOCs(BaseModel):
     ips:     List[str] = []
@@ -34,7 +32,7 @@ class IOCs(BaseModel):
 class MitreAttack(BaseModel):
     tactics:          List[str] = []
     techniques:       List[str] = []
-    kill_chain_phase: str = "unknown"
+    kill_chain_phase: str       = "unknown"
 
 class ThreatIntelOutput(BaseModel):
     threat_actors: List[ThreatActor] = []
@@ -46,11 +44,16 @@ class ThreatIntelOutput(BaseModel):
     summary:       str               = ""
 
 
-# ── Agent + Task factory ────────────────────────────────────────────────── #
-
 def build_threat_intel_agent() -> Agent:
+    _base = BaseAgent(                        
+        name          = "_llm_source",
+        system_prompt = "",
+        temperature   = 0.2,
+    )
     return Agent(
-        role="Senior Threat Intelligence Analyst",
+        role=(
+            "Senior Threat Intelligence Analyst"
+        ),
         goal=(
             "Analyze evidence to identify threat actors, TTPs, CVEs, and IOCs. "
             "Map all findings to the MITRE ATT&CK framework accurately."
@@ -60,7 +63,7 @@ def build_threat_intel_agent() -> Agent:
             "You have tracked APT groups, reverse-engineered campaigns, and briefed executives "
             "on nation-state threats. You think in kill chains and always cite your evidence."
         ),
-        llm=get_llm(temperature=0.2),
+        llm=_base.llm,                       
         verbose=True,
         allow_delegation=False,
     )
@@ -75,34 +78,24 @@ def build_threat_intel_task(agent: Agent, evidence: str) -> Task:
             "Be precise — only report what the evidence supports."
         ),
         expected_output=(
-            "A fully populated ThreatIntelOutput JSON with threat actors, TTPs, CVEs, "
-            "IOCs, MITRE ATT&CK mapping, severity, and a 2-3 sentence summary."
+            "A fully populated ThreatIntelOutput JSON with threat_actors, ttps, cves, "
+            "iocs, mitre_attack, severity, and a 2-3 sentence summary."
         ),
         agent=agent,
-        output_pydantic=ThreatIntelOutput,   # CrewAI validates + parses automatically
+        output_pydantic=ThreatIntelOutput,
     )
 
-
-# ── Public runner ───────────────────────────────────────────────────────── #
-
 class ThreatIntelAgent:
-    """
-    Thin wrapper so the rest of your codebase calls:
-        agent = ThreatIntelAgent()
-        result = await agent.run(evidence)
-    """
     def __init__(self):
         self._agent = build_threat_intel_agent()
 
     async def run(self, evidence: str) -> dict:
-        import asyncio
         try:
             task   = build_threat_intel_task(self._agent, evidence)
             crew   = Crew(agents=[self._agent], tasks=[task], verbose=False)
             loop   = asyncio.get_event_loop()
             output = await loop.run_in_executor(None, crew.kickoff)
 
-            # output.pydantic is a ThreatIntelOutput instance
             result: ThreatIntelOutput = output.pydantic
             return {
                 **result.model_dump(),
