@@ -6,7 +6,7 @@ logging.basicConfig(level=logging.INFO)
 
 from agents.threat_intel_agent import ThreatIntelAgent
 from agents.malware_analysis_agent import MalwareAnalysisAgent
-from agents.log_correlation import LogCorrelationAgent
+from agents.log_correlation_agent import LogCorrelationAgent
 
 # ── Sample evidence ────────────────────────────────────────────────────── #
 
