@@ -3,24 +3,27 @@ import asyncio
 from typing import List
 from pydantic import BaseModel, Field
 from crewai import Agent, Task, Crew
-from agents.base_agent import BaseAgent         
+from agents.base_agent import get_llm        # ← fixed import
 
 logger = logging.getLogger(__name__)
 
+
+# ── Pydantic output schema ─────────────────────────────────────────────── #
+
 class ThreatActor(BaseModel):
     name:       str       = ""
-    confidence: str       = "low"   
+    confidence: str       = "low"    # high | medium | low
     aliases:    List[str] = []
 
 class TTP(BaseModel):
-    technique_id:   str = ""
+    technique_id:   str = ""         # T1059.001
     technique_name: str = ""
     tactic:         str = ""
     evidence:       str = ""
 
 class CVE(BaseModel):
     cve_id:      str = ""
-    severity:    str = "unknown" 
+    severity:    str = "unknown"     # critical | high | medium | low
     description: str = ""
 
 class IOCs(BaseModel):
@@ -44,16 +47,11 @@ class ThreatIntelOutput(BaseModel):
     summary:       str               = ""
 
 
+# ── Agent + Task factory ───────────────────────────────────────────────── #
+
 def build_threat_intel_agent() -> Agent:
-    _base = BaseAgent(                        
-        name          = "_llm_source",
-        system_prompt = "",
-        temperature   = 0.2,
-    )
     return Agent(
-        role=(
-            "Senior Threat Intelligence Analyst"
-        ),
+        role="Senior Threat Intelligence Analyst",
         goal=(
             "Analyze evidence to identify threat actors, TTPs, CVEs, and IOCs. "
             "Map all findings to the MITRE ATT&CK framework accurately."
@@ -63,7 +61,7 @@ def build_threat_intel_agent() -> Agent:
             "You have tracked APT groups, reverse-engineered campaigns, and briefed executives "
             "on nation-state threats. You think in kill chains and always cite your evidence."
         ),
-        llm=_base.llm,                       
+        llm=get_llm(temperature=0.2),        # ← clean, uses get_llm directly
         verbose=True,
         allow_delegation=False,
     )
@@ -85,11 +83,23 @@ def build_threat_intel_task(agent: Agent, evidence: str) -> Task:
         output_pydantic=ThreatIntelOutput,
     )
 
+
+# ── Public runner ──────────────────────────────────────────────────────── #
+
 class ThreatIntelAgent:
     def __init__(self):
         self._agent = build_threat_intel_agent()
 
     async def run(self, evidence: str) -> dict:
+        """
+        Run threat intelligence analysis on raw evidence.
+
+        Args:
+            evidence: Raw text from packets, logs, emails, PDFs, etc.
+
+        Returns:
+            Validated dict with threat actors, TTPs, CVEs, IOCs, MITRE mapping.
+        """
         try:
             task   = build_threat_intel_task(self._agent, evidence)
             crew   = Crew(agents=[self._agent], tasks=[task], verbose=False)

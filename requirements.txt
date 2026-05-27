@@ -1,4 +1,5 @@
-crewai>=0.80.0
+crewai[litellm]>=0.80.0
 pydantic>=2.7.0
 python-dotenv>=1.0.0
 tenacity>=8.2.0
+litellm
