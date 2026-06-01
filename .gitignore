@@ -117,3 +117,8 @@ dmypy.json
 *.pem
 *.key
 *.crt
+
+#-----------------------
+# Testing & Test Files
+#-----------------------
+test_agents.py

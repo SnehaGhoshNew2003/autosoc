@@ -3,27 +3,24 @@ import asyncio
 from typing import List
 from pydantic import BaseModel, Field
 from crewai import Agent, Task, Crew
-from agents.base_agent import get_llm        # ← fixed import
+from agents.base_agent import get_llm       
 
 logger = logging.getLogger(__name__)
 
-
-# ── Pydantic output schema ─────────────────────────────────────────────── #
-
 class ThreatActor(BaseModel):
     name:       str       = ""
-    confidence: str       = "low"    # high | medium | low
+    confidence: str       = "low"   
     aliases:    List[str] = []
 
 class TTP(BaseModel):
-    technique_id:   str = ""         # T1059.001
+    technique_id:   str = ""     
     technique_name: str = ""
     tactic:         str = ""
     evidence:       str = ""
 
 class CVE(BaseModel):
     cve_id:      str = ""
-    severity:    str = "unknown"     # critical | high | medium | low
+    severity:    str = "unknown"   
     description: str = ""
 
 class IOCs(BaseModel):
@@ -46,9 +43,6 @@ class ThreatIntelOutput(BaseModel):
     severity:      str               = "unknown"
     summary:       str               = ""
 
-
-# ── Agent + Task factory ───────────────────────────────────────────────── #
-
 def build_threat_intel_agent() -> Agent:
     return Agent(
         role="Senior Threat Intelligence Analyst",
@@ -61,7 +55,7 @@ def build_threat_intel_agent() -> Agent:
             "You have tracked APT groups, reverse-engineered campaigns, and briefed executives "
             "on nation-state threats. You think in kill chains and always cite your evidence."
         ),
-        llm=get_llm(temperature=0.2),        # ← clean, uses get_llm directly
+        llm=get_llm(temperature=0.2),     
         verbose=True,
         allow_delegation=False,
     )
@@ -82,9 +76,6 @@ def build_threat_intel_task(agent: Agent, evidence: str) -> Task:
         agent=agent,
         output_pydantic=ThreatIntelOutput,
     )
-
-
-# ── Public runner ──────────────────────────────────────────────────────── #
 
 class ThreatIntelAgent:
     def __init__(self):

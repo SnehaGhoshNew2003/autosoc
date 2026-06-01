@@ -1,4 +1,3 @@
-# log_correlation_agent
 import logging
 from typing import List, Optional
 from pydantic import BaseModel, Field
