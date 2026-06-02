@@ -1,3 +1,4 @@
+#base.agent
 import asyncio
 import json
 import logging

@@ -122,3 +122,5 @@ dmypy.json
 # Testing & Test Files
 #-----------------------
 test_agents.py
+test_graph.py
+test_pipeline.py
