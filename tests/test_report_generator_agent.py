@@ -2,6 +2,7 @@ import os
 import pytest
 # Adjust this import if your folder structure uses a different naming convention
 from agents.report_generator_agent import ReportGeneratorAgent
+from agents.multi_agent_debate import MultiAgentDebate
 
 @pytest.fixture
 def mock_upstream_success_data():
@@ -72,3 +73,43 @@ async def test_report_generator_live_llm(mock_upstream_success_data):
     # Assert model fulfilled structured output boundaries
     assert result is not None
     assert result.get("_status") == "complete"
+
+
+@pytest.mark.asyncio
+@pytest.mark.integration
+async def test_multi_agent_debate_live_llm(mock_upstream_success_data):
+    """
+    [INTEGRATION] Invokes the live Multi-Agent Debate system (requires GROQ_API_KEY).
+    Runs Red Team vs Blue Team arguments evaluated by a CISO Judge.
+    """
+    if not os.getenv("GROQ_API_KEY"):
+        pytest.skip("Skipping live LLM test: GROQ_API_KEY environment variable not set.")
+
+    debate_orchestrator = MultiAgentDebate()
+    result = await debate_orchestrator.run(
+        log_data=mock_upstream_success_data["log_correlation"],
+        intel_data=mock_upstream_success_data["threat_intel"],
+        malware_data=mock_upstream_success_data["malware_analysis"],
+        timeline_data=mock_upstream_success_data["timeline_reconstruction"]
+    )
+
+    # Print out the adjudicated executive threat verdict to the console
+    print("\n" + "="*35 + "⚖️ ADJUDICATED EXECUTIVE DEBATE VERDICT ⚖️" + "="*35)
+    print(f"FINAL VERDICT    : {result.get('final_verdict')}")
+    print(f"CONFIDENCE SCORE : {result.get('confidence_score')}%")
+    print(f"EXECUTIVE SUMMARY: {result.get('executive_summary')}")
+    print("-" * 112)
+    print("🔴 KEY RED TEAM ARGUMENTS:")
+    for point in result.get("key_red_team_evidence", []):
+        print(f"  - {point}")
+    print("\n🔵 KEY BLUE TEAM ARGUMENTS:")
+    for point in result.get("key_blue_team_evidence", []):
+        print(f"  - {point}")
+    print("=" * 112 + "\n")
+
+    # Content assertions ensuring the schema constraints match perfectly
+    assert result is not None
+    assert result.get("_status") == "complete"
+    assert "final_verdict" in result
+    assert isinstance(result.get("confidence_score"), int)
+    assert len(result.get("key_red_team_evidence")) > 0
