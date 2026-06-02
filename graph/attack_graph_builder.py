@@ -41,14 +41,11 @@ class AttackGraphBuilder:
 
         logger.info("[AttackGraph] Graph build complete")
 
-    # ── Writers ───────────────────────────────────────────────────────── #
-
     def _write_threat_intel(self, data: dict):
         if data.get("_status") == "error":
             logger.warning("[AttackGraph] Skipping ThreatIntel — agent errored")
             return
 
-        # Threat actors
         for actor in data.get("threat_actors", []):
             name = actor.get("name", "")
             if not name or name.lower() == "unknown":
@@ -58,8 +55,6 @@ class AttackGraphBuilder:
                 confidence=actor.get("confidence", "low"),
                 aliases=actor.get("aliases", []),
             )
-
-        # TTPs → Technique nodes + actor→technique links
         for ttp in data.get("ttps", []):
             tid = ttp.get("technique_id", "")
             if not tid:
@@ -74,7 +69,6 @@ class AttackGraphBuilder:
                 if name and name.lower() != "unknown":
                     self.client.link_actor_uses_technique(name, tid)
 
-        # CVEs
         for cve in data.get("cves", []):
             cve_id = cve.get("cve_id", "")
             if cve_id:
@@ -84,7 +78,6 @@ class AttackGraphBuilder:
                     description=cve.get("description", ""),
                 )
 
-        # IOCs
         iocs = data.get("iocs", {})
         for ip in iocs.get("ips", []):
             self.client.merge_ip(ip)
@@ -109,7 +102,6 @@ class AttackGraphBuilder:
             threat_level=data.get("threat_level", "unknown"),
         )
 
-        # Malware MITRE techniques
         for mt in data.get("mitre_techniques", []):
             tid = mt.get("technique_id", "")
             if tid:
@@ -119,7 +111,6 @@ class AttackGraphBuilder:
                 )
                 self.client.link_malware_uses_technique(family, tid)
 
-        # Malware IOCs
         iocs = data.get("iocs", {})
         for ip in iocs.get("ips", []):
             self.client.merge_ip(ip)
@@ -127,9 +118,7 @@ class AttackGraphBuilder:
         for h in iocs.get("hashes", []):
             self.client.merge_hash(h)
         for path in iocs.get("file_paths", []):
-            pass  # file paths stored on malware node if needed
-
-        # Network connections
+            pass  
         ba = data.get("behavioral_analysis", {})
         for conn in ba.get("network_connections", []):
             ip = conn.get("ip", "")
@@ -147,8 +136,6 @@ class AttackGraphBuilder:
         events = data.get("timeline", [])
         for i, ev in enumerate(events):
             event_id = f"evt_{i:04d}_{ev.get('timestamp', '').replace(' ', '_').replace(':', '')}"
-
-            # Write event node
             self.client.merge_event(
                 event_id=event_id,
                 timestamp=ev.get("timestamp", ""),
@@ -160,7 +147,6 @@ class AttackGraphBuilder:
                 confidence=ev.get("confidence", "low"),
             )
 
-            # Write technique node and link
             tid = ev.get("technique_id", "")
             if tid:
                 self.client.merge_technique(
@@ -169,23 +155,21 @@ class AttackGraphBuilder:
                 )
                 self.client.link_event_uses_technique(event_id, tid)
 
-            # Link event → IOCs
             for ioc in ev.get("iocs_involved", []):
                 ioc = ioc.strip()
                 if not ioc:
                     continue
-                # crude type detection
+
                 if "." in ioc and len(ioc.split(".")) == 4:
                     self.client.merge_ip(ioc)
                     self.client.link_event_involves_ip(event_id, ioc)
-                elif len(ioc) in (32, 40, 64):   # MD5, SHA1, SHA256 length
+                elif len(ioc) in (32, 40, 64):   
                     self.client.merge_hash(ioc)
                     self.client.link_event_involves_hash(event_id, ioc)
                 elif "." in ioc and not ioc[0].isdigit():
                     self.client.merge_domain(ioc)
                     self.client.link_event_involves_domain(event_id, ioc)
 
-        # PRECEDES chain — link consecutive events in order
         event_ids = [
             f"evt_{i:04d}_{ev.get('timestamp', '').replace(' ', '_').replace(':', '')}"
             for i, ev in enumerate(events)

@@ -42,7 +42,6 @@ class Neo4jClient:
         with self._driver.session(database=self._database) as session:
             return session.run(query, params or {}).data()
 
-    # ── Schema / Constraints ──────────────────────────────────────────── #
 
     def create_constraints(self):
         """
@@ -66,7 +65,6 @@ class Neo4jClient:
                 logger.warning(f"[Neo4j] Constraint skipped: {e}")
         logger.info("[Neo4j] Constraints ready")
 
-    # ── Node writers ──────────────────────────────────────────────────── #
 
     def merge_ip(self, ip: str, first_seen: str = "", last_seen: str = ""):
         self._run(
@@ -163,8 +161,6 @@ class Neo4jClient:
                 "technique_name": technique_name, "confidence": confidence,
             }
         )
-
-    # ── Relationship writers ──────────────────────────────────────────── #
 
     def link_actor_uses_technique(self, actor_name: str, technique_id: str):
         self._run(
@@ -280,8 +276,6 @@ class Neo4jClient:
             """,
             {"before": event_id_before, "after": event_id_after}
         )
-
-    # ── Query helpers ─────────────────────────────────────────────────── #
 
     def get_all_iocs(self) -> dict:
         """Return all IOC nodes grouped by type."""

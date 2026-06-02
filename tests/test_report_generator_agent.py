@@ -1,6 +1,5 @@
 import os
 import pytest
-# Adjust this import if your folder structure uses a different naming convention
 from agents.report_generator_agent import ReportGeneratorAgent
 from agents.multi_agent_debate import MultiAgentDebate
 
@@ -64,13 +63,10 @@ async def test_report_generator_live_llm(mock_upstream_success_data):
         threat_intel_result=mock_upstream_success_data["threat_intel"],
         timeline_result=mock_upstream_success_data["timeline_reconstruction"]
     )
-
-    # Print out the generated report during test execution
     print("\n" + "="*40 + " GENERATED MARKDOWN REPORT " + "="*40)
     print(result.get("formatted_markdown"))
     print("=" * 107 + "\n")
 
-    # Assert model fulfilled structured output boundaries
     assert result is not None
     assert result.get("_status") == "complete"
 
@@ -92,8 +88,6 @@ async def test_multi_agent_debate_live_llm(mock_upstream_success_data):
         malware_data=mock_upstream_success_data["malware_analysis"],
         timeline_data=mock_upstream_success_data["timeline_reconstruction"]
     )
-
-    # Print out the adjudicated executive threat verdict to the console
     print("\n" + "="*35 + "⚖️ ADJUDICATED EXECUTIVE DEBATE VERDICT ⚖️" + "="*35)
     print(f"FINAL VERDICT    : {result.get('final_verdict')}")
     print(f"CONFIDENCE SCORE : {result.get('confidence_score')}%")
@@ -107,7 +101,6 @@ async def test_multi_agent_debate_live_llm(mock_upstream_success_data):
         print(f"  - {point}")
     print("=" * 112 + "\n")
 
-    # Content assertions ensuring the schema constraints match perfectly
     assert result is not None
     assert result.get("_status") == "complete"
     assert "final_verdict" in result

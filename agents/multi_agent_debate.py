@@ -7,8 +7,6 @@ from agents.base_agent import get_llm
 
 logger = logging.getLogger(__name__)
 
-# ─── Pydantic Output Schema ───────────────────────────────────────
-
 class ThreatVerdict(BaseModel):
     final_verdict: str = Field(description="e.g., 'Confirmed True Positive', 'Likely False Positive', 'Benign Admin Activity'")
     confidence_score: int = Field(description="Confidence percentage from 0 to 100")
@@ -16,7 +14,6 @@ class ThreatVerdict(BaseModel):
     key_blue_team_evidence: List[str] = Field(description="Strongest points arguing it is benign")
     executive_summary: str = Field(description="A 2-sentence summary of the final conclusion")
 
-# ─── Agent Builders ───────────────────────────────────────────────
 
 def build_red_team_agent() -> Agent:
     return Agent(
@@ -55,12 +52,10 @@ def build_judge_agent() -> Agent:
             "you listen to your Red Team and Blue Team debate. You penalize logical leaps and "
             "reward hard evidence. You make the final, objective decision on the threat severity."
         ),
-        llm=get_llm(temperature=0.0),  # Strict, deterministic output
+        llm=get_llm(temperature=0.0),  
         verbose=False,
         allow_delegation=False,
     )
-
-# ─── Orchestrator Class ───────────────────────────────────────────
 
 class MultiAgentDebate:
     """
@@ -84,15 +79,12 @@ class MultiAgentDebate:
         """
         logger.info("[MultiAgentDebate] Initiating Final Threat Verdict Debate...")
 
-        # Format the combined evidence from your existing pipeline
         evidence_bundle = (
             f"=== LOG EVIDENCE ===\n{log_data.get('summary', 'None')}\n\n"
             f"=== INTEL EVIDENCE ===\n{intel_data.get('summary', 'None')}\n\n"
             f"=== MALWARE EVIDENCE ===\n{malware_data.get('summary', 'None')}\n\n"
             f"=== RECONSTRUCTED TIMELINE ===\n{timeline_data.get('narrative', 'None')}\n"
         )
-
-        # Task 1: Red Team creates the initial attack claim
         red_task = Task(
             description=(
                 f"EVIDENCE BUNDLE:\n{evidence_bundle}\n\n"
@@ -103,7 +95,6 @@ class MultiAgentDebate:
             agent=self.red_team
         )
 
-        # Task 2: Blue Team reads Red's claim and counters it
         blue_task = Task(
             description=(
                 f"EVIDENCE BUNDLE:\n{evidence_bundle}\n\n"
@@ -113,10 +104,9 @@ class MultiAgentDebate:
             ),
             expected_output="A robust paragraph dismantling the Red Team's argument using counter-evidence.",
             agent=self.blue_team,
-            context=[red_task]  # Pulls Red Team's output into this task natively
+            context=[red_task]  
         )
 
-        # Task 3: Judge reads both arguments and outputs structured JSON verdict
         judge_task = Task(
             description=(
                 f"EVIDENCE BUNDLE:\n{evidence_bundle}\n\n"
@@ -126,11 +116,10 @@ class MultiAgentDebate:
             ),
             expected_output="A ThreatVerdict structured JSON object containing all required fields.",
             agent=self.judge,
-            context=[red_task, blue_task],  # Pulls both arguments into the adjudication phase
+            context=[red_task, blue_task],  
             output_pydantic=ThreatVerdict
         )
 
-        # Build sequential workflow crew
         crew = Crew(
             agents=[self.red_team, self.blue_team, self.judge],
             tasks=[red_task, blue_task, judge_task],
