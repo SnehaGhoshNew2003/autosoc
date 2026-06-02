@@ -7,11 +7,10 @@ from agents.base_agent import get_llm
 
 logger = logging.getLogger(__name__)
 
-# ── Pydantic Output Schema ─────────────────────────────────────────────── #
 
 class ExecutiveSummary(BaseModel):
     incident_title:       str = ""
-    severity:             str = "unknown"  # critical | high | medium | low
+    severity:             str = "unknown"  
     primary_actor:        str = "unknown"
     dwell_time:           str = ""
     impact_assessment:    str = ""
@@ -28,8 +27,8 @@ class TechnicalFindings(BaseModel):
 
 class RemediationAction(BaseModel):
     action:      str = ""
-    priority:    str = "medium"   # critical | high | medium | low
-    phase:       str = "containment"  # containment | eradication | long-term
+    priority:    str = "medium"   
+    phase:       str = "containment"  
 
 class ReportGeneratorOutput(BaseModel):
     """Culminated blueprint representation of the entire security incident investigation."""
@@ -39,8 +38,6 @@ class ReportGeneratorOutput(BaseModel):
     remediation_plan:    List[RemediationAction] = []
     formatted_markdown:  str                    = ""
 
-
-# ── Agent + Task Factory ──────────────────────────────────────────────── #
 
 def build_report_agent() -> Agent:
     return Agent(
@@ -73,14 +70,13 @@ def build_report_task(
     
     context_str = "=== UPSTREAM AGENT ANALYSIS CONTEXT ===\n\n"
     
-    # Extract Log Correlation data
+
     if log_correlation.get("_status") == "complete":
         context_str += "1. LOG CORRELATION FINDINGS:\n"
         context_str += f"  - Attack Vector: {log_correlation.get('attack_vector', 'unknown')}\n"
         context_str += f"  - Summary: {log_correlation.get('summary', '')}\n"
         context_str += f"  - Anomalies: {len(log_correlation.get('anomalies', []))} identified\n\n"
-        
-    # Extract Malware Analysis data
+
     if malware_analysis.get("_status") == "complete":
         clf = malware_analysis.get("classification", {})
         context_str += "2. MALWARE FORENSICS:\n"
@@ -89,7 +85,6 @@ def build_report_task(
         context_str += f"  - Capabilities: {', '.join(malware_analysis.get('capabilities', []))}\n"
         context_str += f"  - Malware Summary: {malware_analysis.get('summary', '')}\n\n"
 
-    # Extract Threat Intelligence data
     if threat_intel.get("_status") == "complete":
         context_str += "3. THREAT INTELLIGENCE & ATTRIBUTION:\n"
         context_str += f"  - Summary: {threat_intel.get('summary', '')}\n"
@@ -98,7 +93,6 @@ def build_report_task(
         cves = [cve.get('cve_id', '') for cve in threat_intel.get('cves', []) if cve.get('cve_id')]
         context_str += f"  - Exploited CVEs: {', '.join(cves)}\n\n"
 
-    # Extract Timeline Reconstruction data
     if timeline_reconstruction.get("_status") == "complete":
         prof = timeline_reconstruction.get("attacker_profile", {})
         context_str += "4. TIMELINE & ATTACK FLOW:\n"
@@ -136,9 +130,6 @@ def build_report_task(
         output_pydantic=ReportGeneratorOutput,
     )
 
-
-# ── Public Runner ──────────────────────────────────────────────────────── #
-
 class ReportGeneratorAgent:
     """
     Layer 3 agent — Culmination of the pipeline.
@@ -159,7 +150,6 @@ class ReportGeneratorAgent:
         """
         Synthesizes the entire workspace context to generate a comprehensive report.
         """
-        # Verify if all upstream outputs errored out
         upstreams = [log_correlation_result, malware_result, threat_intel_result, timeline_result]
         if all(u.get("_status") == "error" for u in upstreams):
             return {

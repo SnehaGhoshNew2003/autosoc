@@ -1,12 +1,3 @@
-# timeline_reconstruction_agent.py
-#
-# Layer 2 agent — consumes outputs from BOTH:
-#   - LogCorrelationAgent  (correlated events, anomalies, IOCs)
-#   - ThreatIntelAgent     (threat actors, TTPs, CVEs, MITRE mapping)
-#
-# Produces a chronological kill-chain narrative with every event
-# tagged to one of the 7 kill-chain stages and mapped to ATT&CK.
-
 import logging
 import asyncio
 from typing import List, Optional
@@ -16,20 +7,17 @@ from agents.base_agent import get_llm
 
 logger = logging.getLogger(__name__)
 
-
-# ── Pydantic output schema ─────────────────────────────────────────────── #
-
 class KillChainEvent(BaseModel):
     """A single event placed on the kill-chain timeline."""
     timestamp:      str       = ""
-    stage:          str       = "unknown"   # one of the 7 kill-chain stages below
-    description:    str       = ""          # what actually happened
-    source:         str       = ""          # which log/evidence source this came from
-    actor:          str       = ""          # threat actor name if identified
-    technique_id:   str       = ""          # MITRE technique e.g. T1059.001
-    technique_name: str       = ""          # human-readable technique name
-    iocs_involved:  List[str] = []          # IPs, hashes, domains active at this step
-    confidence:     str       = "low"       # high | medium | low
+    stage:          str       = "unknown"   
+    description:    str       = ""          
+    source:         str       = ""          
+    actor:          str       = ""          
+    technique_id:   str       = ""          
+    technique_name: str       = ""         
+    iocs_involved:  List[str] = []          
+    confidence:     str       = "low"      
 
 
 class KillChainStageSummary(BaseModel):
@@ -38,13 +26,12 @@ class KillChainStageSummary(BaseModel):
     Always 7 rows in the output — occurred=False for stages not seen.
     """
     stage:          str       = "unknown"
-    occurred:       bool      = False       # did this stage actually happen?
+    occurred:       bool      = False       
     event_count:    int       = 0
     start_time:     str       = ""
     end_time:       str       = ""
-    key_techniques: List[str] = []          # ATT&CK technique IDs seen at this stage
-    summary:        str       = ""          # 1-sentence summary of this stage
-
+    key_techniques: List[str] = []          
+    summary:        str       = ""         
 
 class AttackerProfile(BaseModel):
     """
@@ -54,11 +41,11 @@ class AttackerProfile(BaseModel):
     """
     primary_actor:      str       = "unknown"
     actor_aliases:      List[str] = []
-    motivation:         str       = "unknown"       # financial | espionage | disruption | unknown
-    sophistication:     str       = "unknown"       # low | medium | high | nation-state
-    dwell_time_minutes: int       = 0               # minutes from first to last observed event
-    initial_access:     str       = ""              # how they got in
-    objective:          str       = ""              # what they were trying to achieve
+    motivation:         str       = "unknown"      
+    sophistication:     str       = "unknown"      
+    dwell_time_minutes: int       = 0             
+    initial_access:     str       = ""              
+    objective:          str       = ""             
 
 
 class TimelineGap(BaseModel):
@@ -69,47 +56,24 @@ class TimelineGap(BaseModel):
     after_timestamp:    str = ""
     before_timestamp:   str = ""
     gap_minutes:        int = 0
-    suspected_activity: str = ""    # what probably happened here based on surrounding evidence
-
+    suspected_activity: str = ""    
 
 class TimelineReconstructionOutput(BaseModel):
     """Full output of the Timeline Reconstruction agent."""
 
-    # Every event, sorted chronologically, each tagged to a kill-chain stage
     timeline:                List[KillChainEvent]        = []
-
-    # One summary per kill-chain stage (7 total)
     stage_summaries:         List[KillChainStageSummary] = []
-
-    # Synthesised attacker profile
     attacker_profile:        AttackerProfile             = Field(default_factory=AttackerProfile)
-
-    # Gaps in the timeline where activity is inferred but not logged
     timeline_gaps:           List[TimelineGap]           = []
-
-    # Key boolean findings
     lateral_movement:        bool = False
     privilege_escalation:    bool = False
     data_exfiltrated:        bool = False
     persistence_established: bool = False
-
-    # The furthest kill-chain stage the attacker reached
     furthest_stage_reached:  str       = "unknown"
-
-    # All unique MITRE ATT&CK technique IDs across the full timeline
     all_techniques:          List[str] = []
-
-    # All unique IOCs across the full timeline (deduplicated)
     all_iocs:                List[str] = []
-
-    # Overall severity for the full attack sequence
-    severity:                str       = "unknown"  # critical | high | medium | low
-
-    # 3-4 sentence narrative readable by a non-technical executive
+    severity:                str       = "unknown"
     narrative:               str       = ""
-
-
-# ── Agent + Task factory ───────────────────────────────────────────────── #
 
 def build_timeline_agent() -> Agent:
     return Agent(
@@ -130,7 +94,6 @@ def build_timeline_agent() -> Agent:
             "You are the bridge between raw forensic data and boardroom-ready briefings."
         ),
         llm=get_llm(temperature=0.1),
-        # Low temperature: timeline reconstruction needs precision, not creativity.
         verbose=True,
         allow_delegation=False,
     )
@@ -147,8 +110,6 @@ def build_timeline_task(
     Fuses both L1 outputs into one structured prompt so the agent
     can cross-reference timestamps with actor/TTP context.
     """
-
-    # ── Format the log correlation output ── #
     events_block = ""
     if log_correlation.get("events"):
         events_block = "CORRELATED EVENTS (from LogCorrelation agent):\n"
@@ -176,8 +137,6 @@ def build_timeline_task(
     attack_vec  = log_correlation.get("attack_vector", "unknown")
     lateral_mv  = log_correlation.get("lateral_movement", False)
     exfil       = log_correlation.get("exfil_detected", False)
-
-    # ── Format the threat intel output ── #
     actors_block = ""
     if threat_intel.get("threat_actors"):
         actors_block = "\nTHREAT ACTORS IDENTIFIED:\n"
@@ -270,9 +229,6 @@ def build_timeline_task(
         output_pydantic=TimelineReconstructionOutput,
     )
 
-
-# ── Public runner ──────────────────────────────────────────────────────── #
-
 class TimelineReconstructionAgent:
     """
     Layer 2 agent — first chain in the pipeline.
@@ -306,7 +262,6 @@ class TimelineReconstructionAgent:
             boolean flags, narrative, and _agent/_status metadata.
         """
 
-        # If BOTH upstream agents failed there is nothing to reconstruct from
         if (log_correlation_result.get("_status") == "error" and
                 threat_intel_result.get("_status") == "error"):
             return {
@@ -319,8 +274,6 @@ class TimelineReconstructionAgent:
                 ),
             }
 
-        # If only one errored we still proceed — agent is instructed to only
-        # cite what evidence supports, so partial input = partial (honest) output
         if log_correlation_result.get("_status") == "error":
             logger.warning(
                 "[TimelineReconstruction] LogCorrelation failed — "
