@@ -2,6 +2,7 @@
 # Byte-compiled / cache
 # -----------------------
 __pycache__/
+.pytest_cache
 *.py[cod]
 *$py.class
 *.so
@@ -121,6 +122,3 @@ dmypy.json
 #-----------------------
 # Testing & Test Files
 #-----------------------
-test_agents.py
-test_graph.py
-test_pipeline.py
