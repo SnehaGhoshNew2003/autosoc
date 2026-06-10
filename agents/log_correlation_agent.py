@@ -4,9 +4,11 @@ from pydantic import BaseModel, Field
 from crewai import Agent, Task, Crew
 from agents.base_agent import get_llm
 import asyncio
-
+from tenacity import retry, stop_after_attempt
+from agents.base_agent import _GroqRateLimitWait
 logger = logging.getLogger(__name__)
-
+_MAX_LOG_CHARS_PER_SOURCE = 3000
+_MAX_LOG_CHARS = 2500
 class CorrelatedEvent(BaseModel):
     timestamp:        str       = ""
     source:           str       = ""          
@@ -82,44 +84,91 @@ def build_log_correlation_task(agent: Agent, evidence: str) -> Task:
         output_pydantic=LogCorrelationOutput,
     )
 
+def _truncate_log_source(name: str, content: str) -> str:
+    """
+    If a single log source exceeds _MAX_LOG_CHARS_PER_SOURCE characters,
+    keep the first 60% and last 40% (head shows initial events, tail shows
+    most recent events — the middle is usually repetitive traffic).
+    Inserts a marker so the agent knows truncation occurred.
+
+    Why chars not tokens: tiktoken isn't available; 4 chars ≈ 1 token is
+    a safe approximation for English log text.
+    """
+    if len(content) <= _MAX_LOG_CHARS_PER_SOURCE:
+        return content
+
+    head_size = int(_MAX_LOG_CHARS_PER_SOURCE * 0.6)
+    tail_size = _MAX_LOG_CHARS_PER_SOURCE - head_size
+    truncated_chars = len(content) - _MAX_LOG_CHARS_PER_SOURCE
+
+    head = content[:head_size]
+    tail = content[-tail_size:]
+
+    logger.warning(
+        f"[LogCorrelation] Source '{name}' truncated: "
+        f"{len(content)} → {_MAX_LOG_CHARS_PER_SOURCE} chars "
+        f"({truncated_chars} chars dropped from middle)"
+    )
+
+    return (
+        f"{head}\n"
+        f"... [{truncated_chars} chars truncated — middle section omitted] ...\n"
+        f"{tail}"
+    )
+
+
 class LogCorrelationAgent:
     def __init__(self):
         self._agent = build_log_correlation_agent()
 
-    async def run(self, log_sources: dict[str, str]) -> dict:
-        
-        formatted = "\n\n".join(
-            f"=== SOURCE: {name.upper()} ===\n{content.strip()}"
-            for name, content in log_sources.items()
-            if content and content.strip()
-        )
+    @retry(stop=stop_after_attempt(4), wait=_GroqRateLimitWait())
+    async def _run_with_retry(self, formatted: str) -> dict:
+        task   = build_log_correlation_task(self._agent, formatted)
+        crew   = Crew(agents=[self._agent], tasks=[task], verbose=False)
+        output = await asyncio.get_running_loop().run_in_executor(None, crew.kickoff)
+        result: LogCorrelationOutput = output.pydantic
+        return {
+            **result.model_dump(),
+            "_agent":  "LogCorrelation",
+            "_status": "complete",
+        }
 
+    async def run(self, log_sources: dict[str, str]) -> dict:
+        """
+        REFACTORED: Truncates each source before formatting.
+        Original: passed raw log content with no size limit.
+        This version: caps each source at _MAX_LOG_CHARS_PER_SOURCE chars.
+        
+        Why per-source truncation instead of total truncation:
+          - Preserves coverage across all sources (firewall + auth + EDR)
+          - Keeps both head and tail of each log (most important for correlation)
+          - Prevents one huge source from crowding out all others
+        """
+        parts = []
+        for name, content in log_sources.items():
+            if not content or not content.strip():
+                continue
+            c = content.strip()
+            if len(c) > _MAX_LOG_CHARS:
+                head = int(_MAX_LOG_CHARS * 0.6)
+                tail = _MAX_LOG_CHARS - head
+                dropped = len(c) - _MAX_LOG_CHARS
+                c = c[:head] + f"\n...[{dropped} chars omitted]...\n" + c[-tail:]
+                logger.warning(f"[LogCorrelation] Truncated '{name}': {dropped} chars dropped")
+            parts.append(f"=== SOURCE: {name.upper()} ===\n{c}")
+
+        formatted = "\n\n".join(parts)
         if not formatted:
             return {
                 **LogCorrelationOutput().model_dump(),
-                "_agent":  "LogCorrelation",
-                "_status": "error",
-                "_error":  "No log content provided",
+                "_agent": "LogCorrelation", "_status": "error",
+                "_error": "No log content provided",
             }
-
         try:
-            task   = build_log_correlation_task(self._agent, formatted)
-            crew   = Crew(agents=[self._agent], tasks=[task], verbose=False)
-            loop   = asyncio.get_event_loop()
-            output = await loop.run_in_executor(None, crew.kickoff)
-
-            result: LogCorrelationOutput = output.pydantic
-            return {
-                **result.model_dump(),
-                "_agent":  "LogCorrelation",
-                "_status": "complete",
-            }
-
+            return await self._run_with_retry(formatted)
         except Exception as e:
-            logger.error(f"[LogCorrelation] run() failed: {e}")
+            logger.error(f"[LogCorrelation] all retries exhausted: {e}")
             return {
                 **LogCorrelationOutput().model_dump(),
-                "_agent":  "LogCorrelation",
-                "_status": "error",
-                "_error":  str(e),
+                "_agent": "LogCorrelation", "_status": "error", "_error": str(e),
             }

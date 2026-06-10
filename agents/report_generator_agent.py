@@ -3,18 +3,18 @@ import asyncio
 from typing import List, Optional
 from pydantic import BaseModel, Field
 from crewai import Agent, Task, Crew
-from agents.base_agent import get_llm
+from agents.base_agent import get_llm, _GroqRateLimitWait
+from tenacity import retry, stop_after_attempt
 
 logger = logging.getLogger(__name__)
 
-
 class ExecutiveSummary(BaseModel):
-    incident_title:       str = ""
-    severity:             str = "unknown"  
-    primary_actor:        str = "unknown"
-    dwell_time:           str = ""
-    impact_assessment:    str = ""
-    executive_narrative:  str = ""
+    incident_title:      str = ""
+    severity:            str = "unknown"
+    primary_actor:       str = "unknown"
+    dwell_time:          str = ""
+    impact_assessment:   str = ""
+    executive_narrative: str = ""
 
 class TechnicalFindings(BaseModel):
     attack_vector:          str       = "unknown"
@@ -26,161 +26,209 @@ class TechnicalFindings(BaseModel):
     top_mitre_techniques:   List[str] = []
 
 class RemediationAction(BaseModel):
-    action:      str = ""
-    priority:    str = "medium"   
-    phase:       str = "containment"  
+    action:   str = ""
+    priority: str = "medium"
+    phase:    str = "containment"
+
+class ReportStructuredOutput(BaseModel):
+    """
+    Structured fields only — NO formatted_markdown here.
+    Keeping this small so the schema + input fits within 12k tokens.
+    """
+    executive_summary:  ExecutiveSummary        = Field(default_factory=ExecutiveSummary)
+    technical_findings: TechnicalFindings       = Field(default_factory=TechnicalFindings)
+    consolidated_iocs:  List[str]               = []
+    remediation_plan:   List[RemediationAction] = []
 
 class ReportGeneratorOutput(BaseModel):
-    """Culminated blueprint representation of the entire security incident investigation."""
-    executive_summary:   ExecutiveSummary       = Field(default_factory=ExecutiveSummary)
-    technical_findings:  TechnicalFindings      = Field(default_factory=TechnicalFindings)
-    consolidated_iocs:   List[str]              = []
-    remediation_plan:    List[RemediationAction] = []
-    formatted_markdown:  str                    = ""
-
+    """Full output including markdown — assembled in Python, not by the LLM."""
+    executive_summary:  ExecutiveSummary        = Field(default_factory=ExecutiveSummary)
+    technical_findings: TechnicalFindings       = Field(default_factory=TechnicalFindings)
+    consolidated_iocs:  List[str]               = []
+    remediation_plan:   List[RemediationAction] = []
+    formatted_markdown: str                     = ""
 
 def build_report_agent() -> Agent:
     return Agent(
-        role="Lead Cybersecurity Incident Cyber-Reporting Officer",
+        role="Lead Cybersecurity Incident Reporting Officer",
         goal=(
-            "Consolidate all technical findings, timelines, malware traits, and threat intelligence "
-            "into a publication-grade C-level executive summary and an actionable technical incident report."
+            "Consolidate all technical findings into a structured incident report "
+            "with executive summary, technical findings, IOCs, and remediation plan."
         ),
         backstory=(
-            "You are a principal incident response leader who has authored forensic reports for global enterprise "
-            "breaches, regulatory bodies, and internal executive boards. You excel at translating dense technical "
-            "forensics (PCAPs, logs, malware disassembly) into crystal-clear business risk language while preserving "
-            "rigorous evidentiary backing for security engineers. Your reports are flawlessly structured, professional, "
-            "and provide explicit remediation playbooks."
+            "You are a principal incident response leader who has authored forensic "
+            "reports for global enterprise breaches and regulatory bodies. "
+            "You translate dense technical forensics into crystal-clear business risk "
+            "language with explicit remediation playbooks."
         ),
         llm=get_llm(temperature=0.2),
         verbose=True,
         allow_delegation=False,
     )
 
+def build_markdown_agent() -> Agent:
+    return Agent(
+        role="Cybersecurity Report Writer",
+        goal="Write a professional markdown incident report from structured findings.",
+        backstory=(
+            "You are a senior technical writer specialising in cybersecurity incident "
+            "reports. You produce clear, professional markdown documents from structured "
+            "data, always including tables for IOCs, timelines, and remediation steps."
+        ),
+        llm=get_llm(temperature=0.3),
+        verbose=False,
+        allow_delegation=False,
+    )
 
-def build_report_task(
-    agent: Agent,
-    log_correlation: dict,
-    malware_analysis: dict,
-    threat_intel: dict,
-    timeline_reconstruction: dict,
-) -> Task:
-    """Fuses inputs from all upstream investigation agents into a massive multi-perspective context block."""
-    
-    context_str = "=== UPSTREAM AGENT ANALYSIS CONTEXT ===\n\n"
-    
 
-    if log_correlation.get("_status") == "complete":
-        context_str += "1. LOG CORRELATION FINDINGS:\n"
-        context_str += f"  - Attack Vector: {log_correlation.get('attack_vector', 'unknown')}\n"
-        context_str += f"  - Summary: {log_correlation.get('summary', '')}\n"
-        context_str += f"  - Anomalies: {len(log_correlation.get('anomalies', []))} identified\n\n"
-
-    if malware_analysis.get("_status") == "complete":
-        clf = malware_analysis.get("classification", {})
-        context_str += "2. MALWARE FORENSICS:\n"
-        context_str += f"  - Type: {clf.get('type', 'unknown')} | Family: {clf.get('family', 'unknown')}\n"
-        context_str += f"  - Threat Level: {malware_analysis.get('threat_level', 'unknown')}\n"
-        context_str += f"  - Capabilities: {', '.join(malware_analysis.get('capabilities', []))}\n"
-        context_str += f"  - Malware Summary: {malware_analysis.get('summary', '')}\n\n"
-
-    if threat_intel.get("_status") == "complete":
-        context_str += "3. THREAT INTELLIGENCE & ATTRIBUTION:\n"
-        context_str += f"  - Summary: {threat_intel.get('summary', '')}\n"
-        actors = [a.get('name', 'unknown') for a in threat_intel.get('threat_actors', [])]
-        context_str += f"  - Identified Actors: {', '.join(actors)}\n"
-        cves = [cve.get('cve_id', '') for cve in threat_intel.get('cves', []) if cve.get('cve_id')]
-        context_str += f"  - Exploited CVEs: {', '.join(cves)}\n\n"
-
-    if timeline_reconstruction.get("_status") == "complete":
-        prof = timeline_reconstruction.get("attacker_profile", {})
-        context_str += "4. TIMELINE & ATTACK FLOW:\n"
-        context_str += f"  - Narrative: {timeline_reconstruction.get('narrative', '')}\n"
-        context_str += f"  - Furthest Stage Reached: {timeline_reconstruction.get('furthest_stage_reached', 'unknown')}\n"
-        context_str += f"  - Dwell Time: {prof.get('dwell_time_minutes', 0)} minutes\n"
-        context_str += f"  - Operational Flags: Lateral Move={timeline_reconstruction.get('lateral_movement')}, PrivEsc={timeline_reconstruction.get('privilege_escalation')}, Exfil={timeline_reconstruction.get('data_exfiltrated')}, Persistence={timeline_reconstruction.get('persistence_established')}\n"
-        context_str += f"  - Total Timeline Events: {len(timeline_reconstruction.get('timeline', []))}\n"
-        context_str += f"  - Consolidated Techniques: {', '.join(timeline_reconstruction.get('all_techniques', []))}\n"
-        context_str += f"  - Consolidated IOCs: {', '.join(timeline_reconstruction.get('all_iocs', []))}\n\n"
+def build_structured_task(agent: Agent, summaries: dict) -> Task:
+    """
+    Step 1: Generate structured JSON fields only.
+    No formatted_markdown — keeps the schema small enough to fit in 12k tokens.
+    """
+    log_s      = summaries.get("log_summary",      "Not available.")
+    intel_s    = summaries.get("intel_summary",    "Not available.")
+    malware_s  = summaries.get("malware_summary",  "Not available.")
+    timeline_s = summaries.get("timeline_summary", "Not available.")
 
     return Task(
         description=(
-            f"{context_str}"
-            "═══ YOUR TASK ═══\n"
-            "You must synthesize all provided cybersecurity forensics data into a single master incident report. "
-            "1. Populate all JSON properties of the `ReportGeneratorOutput` schema exactly.\n"
-            "2. Dedup and consolidate all indicators of compromise (IOCs) across logs, malware findings, and intel.\n"
-            "3. Build an actionable, prioritized remediation plan featuring concrete Containment, Eradication, and Long-Term Recovery steps.\n"
-            "4. Compose a comprehensive, beautifully structured C-level Markdown report block inside `formatted_markdown`. "
-            "The Markdown report MUST contain:\n"
-            "   - An Incident Overview executive dashboard layout with a clear title and severity metrics.\n"
-            "   - Detailed Threat Actor Attribution and Kill-Chain Analysis.\n"
-            "   - Technical breakdown of the malware footprint and system impacts (if found).\n"
-            "   - Structured markdown tables showing the consolidated attack timeline and IOC lists.\n"
-            "   - A prioritized table for remediation tasks.\n\n"
-            "RULES: Ensure strict fidelity to the technical evidence. Never invent dates or hashes. "
-            "If information is missing from upstream outputs, explicitly state it as 'Not Observed'."
+            "Synthesize these four security briefings into a structured incident report.\n\n"
+            f"LOG CORRELATION:\n{log_s}\n\n"
+            f"THREAT INTELLIGENCE:\n{intel_s}\n\n"
+            f"MALWARE ANALYSIS:\n{malware_s}\n\n"
+            f"ATTACK TIMELINE:\n{timeline_s}\n\n"
+            "Populate: executive_summary, technical_findings, "
+            "consolidated_iocs (deduplicated), and remediation_plan "
+            "(Containment → Eradication → Recovery, prioritized).\n"
+            "Never invent IOCs or hashes. State 'Not Observed' if data is missing."
         ),
         expected_output=(
-            "A fully populated ReportGeneratorOutput JSON object containing highly professional, structured forensic reports, "
-            "remediation metrics, and a stunning formatted_markdown publication-ready report text block."
+            "A fully populated ReportStructuredOutput JSON with executive_summary, "
+            "technical_findings, consolidated_iocs, and remediation_plan."
         ),
         agent=agent,
-        output_pydantic=ReportGeneratorOutput,
+        output_pydantic=ReportStructuredOutput,
+    )
+
+def build_markdown_task(agent: Agent, structured: ReportStructuredOutput,
+                        summaries: dict) -> Task:
+    """
+    Step 2: Generate markdown from the structured output.
+    Plain text expected_output — no Pydantic schema overhead.
+    """
+    es  = structured.executive_summary
+    tf  = structured.technical_findings
+    iocs = structured.consolidated_iocs
+    plan = structured.remediation_plan
+
+    remediation_rows = "\n".join(
+        f"| {r.priority.upper()} | {r.phase.title()} | {r.action} |"
+        for r in plan
+    )
+    ioc_rows = "\n".join(f"| `{ioc}` |" for ioc in iocs)
+
+    return Task(
+        description=(
+            "Write a professional markdown cybersecurity incident report "
+            "from the structured data below.\n\n"
+
+            f"INCIDENT TITLE: {es.incident_title}\n"
+            f"SEVERITY: {es.severity}\n"
+            f"PRIMARY ACTOR: {es.primary_actor}\n"
+            f"DWELL TIME: {es.dwell_time}\n"
+            f"IMPACT: {es.impact_assessment}\n"
+            f"NARRATIVE: {es.executive_narrative}\n\n"
+
+            f"ATTACK VECTOR: {tf.attack_vector}\n"
+            f"FURTHEST STAGE: {tf.furthest_stage_reached}\n"
+            f"LATERAL MOVEMENT: {tf.lateral_movement}\n"
+            f"PRIVILEGE ESCALATION: {tf.privilege_escalation}\n"
+            f"DATA EXFILTRATION: {tf.data_exfiltration}\n"
+            f"PERSISTENCE: {tf.persistence_mechanisms}\n"
+            f"MITRE TECHNIQUES: {', '.join(tf.top_mitre_techniques)}\n\n"
+
+            f"CONSOLIDATED IOCs:\n{ioc_rows or 'None'}\n\n"
+
+            f"REMEDIATION PLAN:\n{remediation_rows or 'None'}\n\n"
+
+            "REQUIRED SECTIONS:\n"
+            "1. # Incident Overview (title, severity badge, key metrics table)\n"
+            "2. ## Threat Actor Attribution\n"
+            "3. ## Kill-Chain Analysis\n"
+            "4. ## Malware Footprint\n"
+            "5. ## Consolidated IOC Table\n"
+            "6. ## Prioritized Remediation Table\n\n"
+            "Use markdown tables. Never invent data not present above."
+        ),
+        expected_output=(
+            "A complete professional markdown incident report with all six sections, "
+            "IOC table, and remediation table. Plain markdown text only."
+        ),
+        agent=agent,
     )
 
 class ReportGeneratorAgent:
-    """
-    Layer 3 agent — Culmination of the pipeline.
-    Fuses outputs from LogCorrelation, MalwareAnalysis, ThreatIntel, and TimelineReconstruction
-    into a unified corporate/technical forensic incident report.
-    """
-
     def __init__(self):
-        self._agent = build_report_agent()
+        self._struct_agent   = build_report_agent()
+        self._markdown_agent = build_markdown_agent()
 
-    async def run(
-        self,
-        log_correlation_result: dict,
-        malware_result:         dict,
-        threat_intel_result:    dict,
-        timeline_result:        dict,
-    ) -> dict:
+    @retry(stop=stop_after_attempt(4), wait=_GroqRateLimitWait())
+    async def _generate_structured(self, summaries: dict) -> ReportStructuredOutput:
+        """Step 1 — structured JSON fields, small schema, fits in 12k."""
+        task   = build_structured_task(self._struct_agent, summaries)
+        crew   = Crew(agents=[self._struct_agent], tasks=[task], verbose=False)
+        output = await asyncio.get_running_loop().run_in_executor(None, crew.kickoff)
+        return output.pydantic 
+
+    @retry(stop=stop_after_attempt(4), wait=_GroqRateLimitWait())
+    async def _generate_markdown(self, structured: ReportStructuredOutput,
+                                 summaries: dict) -> str:
+        """Step 2 — plain text markdown, no Pydantic schema overhead."""
+        task   = build_markdown_task(self._markdown_agent, structured, summaries)
+        crew   = Crew(agents=[self._markdown_agent], tasks=[task], verbose=False)
+        output = await asyncio.get_running_loop().run_in_executor(None, crew.kickoff)
+        return str(output).strip() 
+    
+    async def run(self, summaries: dict) -> dict:
         """
-        Synthesizes the entire workspace context to generate a comprehensive report.
+        Two-step generation:
+          1. Structured fields (JSON + small Pydantic schema) — fits in 12k
+          2. Markdown narrative (plain text, no schema overhead) — fits in 12k
+        Assembled into ReportGeneratorOutput in Python.
         """
-        upstreams = [log_correlation_result, malware_result, threat_intel_result, timeline_result]
-        if all(u.get("_status") == "error" for u in upstreams):
+        all_failed = all(
+            "failed:" in summaries.get(k, "failed:")
+            for k in ("log_summary", "intel_summary",
+                      "malware_summary", "timeline_summary")
+        )
+        if all_failed:
             return {
                 **ReportGeneratorOutput().model_dump(),
                 "_agent":  "ReportGenerator",
                 "_status": "error",
-                "_error":  "All upstream investigations failed. Insufficient source telemetry to compile report.",
+                "_error":  "All upstream summaries indicate agent failures.",
             }
 
         try:
-            task = build_report_task(
-                agent=self._agent,
-                log_correlation=log_correlation_result,
-                malware_analysis=malware_result,
-                threat_intel=threat_intel_result,
-                timeline_reconstruction=timeline_result
-            )
-            
-            crew = Crew(agents=[self._agent], tasks=[task], verbose=False)
-            loop = asyncio.get_event_loop()
-            output = await loop.run_in_executor(None, crew.kickoff)
-            
-            result: ReportGeneratorOutput = output.pydantic
+            structured = await self._generate_structured(summaries)
+            await asyncio.sleep(8)
+            markdown = await self._generate_markdown(structured, summaries)
+
             return {
-                **result.model_dump(),
+                **ReportGeneratorOutput(
+                    executive_summary  = structured.executive_summary,
+                    technical_findings = structured.technical_findings,
+                    consolidated_iocs  = structured.consolidated_iocs,
+                    remediation_plan   = structured.remediation_plan,
+                    formatted_markdown = markdown,
+                ).model_dump(),
                 "_agent":  "ReportGenerator",
                 "_status": "complete",
             }
-            
+
         except Exception as e:
-            logger.error(f"[ReportGenerator] run() failed: {e}")
+            logger.error(f"[ReportGenerator] run() exhausted all retries: {e}")
             return {
                 **ReportGeneratorOutput().model_dump(),
                 "_agent":  "ReportGenerator",

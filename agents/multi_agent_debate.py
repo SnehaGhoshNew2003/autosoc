@@ -4,8 +4,19 @@ from typing import List
 from pydantic import BaseModel, Field
 from crewai import Agent, Task, Crew
 from agents.base_agent import get_llm
+from agents.base_agent import _GroqRateLimitWait
+from tenacity import retry, stop_after_attempt
 
 logger = logging.getLogger(__name__)
+
+def _cap(text: str, n: int = 300) -> str:
+    """
+    Cap a text field at max_chars.
+    Debate agents only need the key conclusion from each upstream agent,
+    not the full verbose summary. 400 chars ≈ 100 tokens per field.
+    """
+    return (text or "None")[:n] + ("..." if len(text or "") > n else "")
+
 
 class ThreatVerdict(BaseModel):
     final_verdict: str = Field(description="e.g., 'Confirmed True Positive', 'Likely False Positive', 'Benign Admin Activity'")
@@ -66,7 +77,7 @@ class MultiAgentDebate:
         self.red_team = build_red_team_agent()
         self.blue_team = build_blue_team_agent()
         self.judge = build_judge_agent()
-
+    @retry(stop=stop_after_attempt(4), wait=_GroqRateLimitWait())
     async def run(
         self, 
         log_data: dict, 
@@ -80,10 +91,10 @@ class MultiAgentDebate:
         logger.info("[MultiAgentDebate] Initiating Final Threat Verdict Debate...")
 
         evidence_bundle = (
-            f"=== LOG EVIDENCE ===\n{log_data.get('summary', 'None')}\n\n"
-            f"=== INTEL EVIDENCE ===\n{intel_data.get('summary', 'None')}\n\n"
-            f"=== MALWARE EVIDENCE ===\n{malware_data.get('summary', 'None')}\n\n"
-            f"=== RECONSTRUCTED TIMELINE ===\n{timeline_data.get('narrative', 'None')}\n"
+            f"LOG: {_cap(log_data.get('summary','None'))}\n\n"
+            f"INTEL: {_cap(intel_data.get('summary','None'))}\n\n"
+            f"MALWARE: {_cap(malware_data.get('summary','None'))}\n\n"
+            f"TIMELINE: {_cap(timeline_data.get('narrative','None'))}\n"
         )
         red_task = Task(
             description=(
@@ -128,10 +139,9 @@ class MultiAgentDebate:
         )
 
         try:
-            loop = asyncio.get_event_loop()
-            crew_output = await loop.run_in_executor(None, crew.kickoff)
+            output = await asyncio.get_running_loop().run_in_executor(None, crew.kickoff)
             
-            result: ThreatVerdict = crew_output.pydantic
+            result: ThreatVerdict = output.pydantic
             return {
                 **result.model_dump(),
                 "_agent": "MultiAgentDebate",
@@ -140,15 +150,4 @@ class MultiAgentDebate:
 
         except Exception as e:
             logger.error(f"[MultiAgentDebate] run() failed: {e}")
-            return {
-                **ThreatVerdict(
-                    final_verdict="Error during debate execution",
-                    confidence_score=0,
-                    key_red_team_evidence=[],
-                    key_blue_team_evidence=[],
-                    executive_summary=str(e)
-                ).model_dump(),
-                "_agent": "MultiAgentDebate",
-                "_status": "error",
-                "_error": str(e),
-            }
+            raise

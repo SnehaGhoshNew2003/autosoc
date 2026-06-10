@@ -1,31 +1,3 @@
-# db/timescale_client.py
-#
-# Async TimescaleDB (PostgreSQL + TimescaleDB extension) client.
-# Used by the orchestrator to persist every investigation run,
-# every agent result, and every IOC/event extracted by the pipeline.
-#
-# WHY ASYNC:
-#   Your agents already use asyncio. If the DB calls were synchronous,
-#   every INSERT would block the event loop — freezing everything else
-#   while waiting for the disk write. asyncpg is a fully async PostgreSQL
-#   driver that never blocks: DB writes happen in the background while
-#   agents keep running.
-#
-# WHY TIMESCALEDB:
-#   Every piece of data here has a timestamp (agent_runs, events, iocs).
-#   TimescaleDB hypertables auto-partition those tables by time so queries
-#   like "show me all events from this investigation" are fast even with
-#   millions of rows. It's just PostgreSQL — same SQL, same driver, same
-#   everything — just with time partitioning added for free.
-#
-# UUID FIX:
-#   asyncpg returns UUID columns as asyncpg.pgproto.pgproto.UUID objects,
-#   not plain Python strings. Slicing or string operations on them will
-#   raise TypeError. Every SELECT that returns a UUID column now casts it
-#   to TEXT (e.g. id::TEXT) so all callers always receive plain strings.
-#   Rule: never use SELECT * on tables with UUID primary keys — enumerate
-#   columns explicitly and cast every UUID column.
-
 import os
 import json
 import logging
@@ -39,8 +11,6 @@ from dotenv import load_dotenv
 load_dotenv()
 logger = logging.getLogger(__name__)
 
-
-# ── Connection pool ────────────────────────────────────────────────────── #
 
 class TimescaleClient:
     """
@@ -62,13 +32,15 @@ class TimescaleClient:
 
     def __init__(self):
         self._pool: Optional[asyncpg.Pool] = None
-        self._dsn = (
-            f"postgresql://{os.getenv('TIMESCALE_USER', 'postgres')}"
-            f":{os.getenv('TIMESCALE_PASSWORD', 'password')}"
-            f"@{os.getenv('TIMESCALE_HOST', 'localhost')}"
-            f":{os.getenv('TIMESCALE_PORT', '5432')}"
-            f"/{os.getenv('TIMESCALE_DB', 'autosoc')}"
-        )
+        self._dsn = os.getenv("DATABASE_URL")
+        if not self._dsn:
+            self._dsn = (
+                f"postgresql://{os.getenv('TIMESCALE_USER')}"
+                f":{os.getenv('TIMESCALE_PASSWORD')}"
+                f"@{os.getenv('TIMESCALE_HOST')}"
+                f":{os.getenv('TIMESCALE_PORT')}"
+                f"/{os.getenv('TIMESCALE_DB')}"
+            )
 
     async def connect(self, min_size: int = 2, max_size: int = 10):
         """
@@ -107,9 +79,6 @@ class TimescaleClient:
             row = await conn.fetchrow(query, *args)
             return dict(row) if row else None
 
-
-# ── Schema creation ────────────────────────────────────────────────────── #
-
     async def create_schema(self):
         """
         Create all tables and hypertables.
@@ -127,12 +96,7 @@ class TimescaleClient:
         they're the tables analysts will query by time range most often.
         """
         async with self._pool.acquire() as conn:
-
-            # Enable TimescaleDB extension (safe to call if already enabled)
             await conn.execute("CREATE EXTENSION IF NOT EXISTS timescaledb CASCADE;")
-
-            # ── investigations ─────────────────────────────────────────── #
-            # One row per investigation. All other tables FK to this.
             await conn.execute("""
                 CREATE TABLE IF NOT EXISTS investigations (
                     id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -151,11 +115,6 @@ class TimescaleClient:
                     -- executive narrative from ReportGenerator
                 );
             """)
-
-            # ── agent_runs ─────────────────────────────────────────────── #
-            # One row per agent per investigation.
-            # Stores: which agent, when it ran, status, and the full JSON output.
-            # The full JSON is stored in result_json so nothing is lost.
             await conn.execute("""
                 CREATE TABLE IF NOT EXISTS agent_runs (
                     id                UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -176,10 +135,6 @@ class TimescaleClient:
                 );
             """)
 
-            # ── events ─────────────────────────────────────────────────── #
-            # Every kill-chain event from TimelineReconstructionAgent.
-            # This is a hypertable partitioned by event_time so time-range
-            # queries ("show events from 02:13 to 02:22") are fast.
             await conn.execute("""
                 CREATE TABLE IF NOT EXISTS events (
                     id                UUID DEFAULT gen_random_uuid(),
@@ -200,9 +155,6 @@ class TimescaleClient:
                 );
             """)
 
-            # Convert events to a hypertable partitioned by event_time.
-            # The IF NOT EXISTS equivalent for hypertables is to catch the
-            # duplicate error — TimescaleDB raises it if already a hypertable.
             try:
                 await conn.execute("""
                     SELECT create_hypertable(
@@ -214,10 +166,6 @@ class TimescaleClient:
             except Exception as e:
                 logger.debug(f"[TimescaleDB] events hypertable already exists: {e}")
 
-            # ── iocs ───────────────────────────────────────────────────── #
-            # Every IOC (Indicator of Compromise) extracted across all agents.
-            # Deduplicated per investigation via the UNIQUE constraint.
-            # Also a hypertable — analysts query "what IOCs appeared this week?"
             await conn.execute("""
                 CREATE TABLE IF NOT EXISTS iocs (
                     id                UUID DEFAULT gen_random_uuid(),
@@ -248,9 +196,6 @@ class TimescaleClient:
             except Exception as e:
                 logger.debug(f"[TimescaleDB] iocs hypertable already exists: {e}")
 
-            # ── debate_verdicts ────────────────────────────────────────── #
-            # Final output from MultiAgentDebate.
-            # One row per investigation. Stores the full debate result.
             await conn.execute("""
                 CREATE TABLE IF NOT EXISTS debate_verdicts (
                     id                    UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -268,8 +213,6 @@ class TimescaleClient:
                 );
             """)
 
-            # ── indexes ────────────────────────────────────────────────── #
-            # Speed up the most common queries analysts run.
             await conn.execute("""
                 CREATE INDEX IF NOT EXISTS idx_agent_runs_investigation
                 ON agent_runs (investigation_id);
@@ -289,9 +232,6 @@ class TimescaleClient:
             """)
 
         logger.info("[TimescaleDB] Schema ready")
-
-
-# ── Investigation operations ───────────────────────────────────────────── #
 
     async def create_investigation(self, input_summary: str = "") -> str:
         """
@@ -338,9 +278,6 @@ class TimescaleClient:
             investigation_id,
         )
         logger.info(f"[TimescaleDB] Investigation updated: {investigation_id} → {status}")
-
-
-# ── Agent run operations ───────────────────────────────────────────────── #
 
     async def start_agent_run(
         self,
@@ -390,14 +327,11 @@ class TimescaleClient:
             WHERE id = $5::UUID
             """,
             status,
-            json.dumps(result),   # store full dict as JSON string → JSONB
+            json.dumps(result),   
             duration_ms,
             error_message,
             run_id,
         )
-
-
-# ── Event operations ───────────────────────────────────────────────────── #
 
     async def save_events(
         self,
@@ -423,18 +357,15 @@ class TimescaleClient:
         for ev in events:
             ts_str = ev.get("timestamp", "")
             try:
-                # Try parsing as "YYYY-MM-DD HH:MM:SS" first
                 event_time = datetime.strptime(ts_str, "%Y-%m-%d %H:%M:%S").replace(
                     tzinfo=timezone.utc
                 )
             except ValueError:
                 try:
-                    # Fall back to ISO format "YYYY-MM-DDTHH:MM:SS"
                     event_time = datetime.fromisoformat(ts_str).replace(
                         tzinfo=timezone.utc
                     )
                 except ValueError:
-                    # If we still can't parse it, use NOW() so the row is saved
                     logger.warning(f"[TimescaleDB] Unparseable timestamp: '{ts_str}', using NOW()")
                     event_time = datetime.now(timezone.utc)
 
@@ -448,7 +379,7 @@ class TimescaleClient:
                 ev.get("technique_id", ""),
                 ev.get("technique_name", ""),
                 ev.get("confidence", "low"),
-                ev.get("iocs_involved", []),  # stored as TEXT[] in PostgreSQL
+                ev.get("iocs_involved", []), 
             ))
 
         async with self._pool.acquire() as conn:
@@ -466,8 +397,6 @@ class TimescaleClient:
             )
         logger.info(f"[TimescaleDB] Saved {len(rows)} events for {investigation_id}")
 
-
-# ── IOC operations ─────────────────────────────────────────────────────── #
 
     async def save_iocs(
         self,
@@ -508,7 +437,6 @@ class TimescaleClient:
                 context,
             ))
 
-        # ── ThreatIntel IOCs (structured by type) ── #
         ti = agent_results.get("threat_intel", {})
         if ti.get("_status") == "complete":
             iocs = ti.get("iocs", {})
@@ -517,7 +445,6 @@ class TimescaleClient:
             for h      in iocs.get("hashes",  []): _add("hash",   h,      "ThreatIntel")
             for url    in iocs.get("urls",    []): _add("url",    url,    "ThreatIntel")
 
-        # ── Malware IOCs (structured by type) ── #
         mal = agent_results.get("malware", {})
         if mal.get("_status") == "complete":
             iocs   = mal.get("iocs", {})
@@ -528,14 +455,12 @@ class TimescaleClient:
             for path in iocs.get("file_paths", []): _add("file_path", path, "MalwareAnalysis", f"malware:{family}")
             for mut  in iocs.get("mutexes",    []): _add("mutex",     mut,  "MalwareAnalysis", f"malware:{family}")
 
-        # ── Log Correlation IOCs (flat list) ── #
         log = agent_results.get("log", {})
         if log.get("_status") == "complete":
             for ioc in log.get("iocs", []):
                 ioc_type = _infer_ioc_type(ioc)
                 _add(ioc_type, ioc, "LogCorrelation")
 
-        # ── Timeline IOCs (flat list, already deduplicated by the agent) ── #
         tl = agent_results.get("timeline", {})
         if tl.get("_status") == "complete":
             for ioc in tl.get("all_iocs", []):
@@ -558,9 +483,6 @@ class TimescaleClient:
                 rows,
             )
         logger.info(f"[TimescaleDB] Saved {len(rows)} IOC rows for {investigation_id}")
-
-
-# ── Debate verdict operations ──────────────────────────────────────────── #
 
     async def save_debate_verdict(
         self,
@@ -589,7 +511,6 @@ class TimescaleClient:
             json.dumps(debate_result),
         )
 
-        # Also update the investigation's top-level verdict fields
         await self.update_investigation(
             investigation_id=investigation_id,
             status="complete",
@@ -597,9 +518,6 @@ class TimescaleClient:
             confidence=debate_result.get("confidence_score"),
         )
         logger.info(f"[TimescaleDB] Debate verdict saved for {investigation_id}")
-
-
-# ── Query operations (used by UI / analyst queries) ───────────────────── #
 
     async def get_investigation(self, investigation_id: str) -> Optional[dict]:
         """
@@ -804,9 +722,6 @@ class TimescaleClient:
             "verdict":       verdict,
         }
 
-
-# ── IOC type inference helper ──────────────────────────────────────────── #
-
 def _infer_ioc_type(value: str) -> str:
     """
     Guess the IOC type from its format.
@@ -821,25 +736,19 @@ def _infer_ioc_type(value: str) -> str:
       - everything else            → unknown
     """
     v = value.strip()
-
-    # IP: exactly 4 dot-separated parts, all numeric
     parts = v.split(".")
     if len(parts) == 4 and all(p.isdigit() for p in parts):
         return "ip"
 
-    # Hash: hex string of MD5/SHA1/SHA256 length
     if len(v) in (32, 40, 64) and all(c in "0123456789abcdefABCDEF" for c in v):
         return "hash"
 
-    # URL
     if v.startswith("http://") or v.startswith("https://"):
         return "url"
 
-    # File path (Unix or Windows)
     if v.startswith("/") or (len(v) > 2 and v[1] == ":" and v[2] == "\\"):
         return "file_path"
 
-    # Domain: has a dot and doesn't start with a digit
     if "." in v and not v[0].isdigit():
         return "domain"
 

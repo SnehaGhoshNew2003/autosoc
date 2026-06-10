@@ -241,7 +241,8 @@ class Neo4jClient:
             return
         self._run(
             """
-            MATCH (m:Malware {family: $family}), (t:Technique {technique_id: $tid})
+            MATCH (m:Malware {family: $family})
+            MATCH (t:Technique {technique_id: $tid})
             MERGE (m)-[:USES]->(t)
             """,
             {"family": malware_family, "tid": technique_id}

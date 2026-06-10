@@ -1,16 +1,9 @@
-# test_db.py  —  Tests for TimescaleDB client
-# Run with: python test_db.py
-# Requires: TIMESCALE_* env vars set in .env, TimescaleDB running locally
-
 import asyncio
 import json
 import logging
 logging.basicConfig(level=logging.INFO)
 
 from timescale_client import TimescaleClient, _infer_ioc_type
-
-
-# ── Mock agent outputs (same shape as real agents) ─────────────────────── #
 
 MOCK_TIMELINE = {
     "_status": "complete",
@@ -103,9 +96,6 @@ MOCK_DEBATE = {
     "key_blue_team_evidence":["No CVE exploited", "Could be admin activity"],
 }
 
-
-# ── Tests ──────────────────────────────────────────────────────────────── #
-
 async def test_connection():
     print("\n" + "="*50)
     print("TEST: DB connection and schema")
@@ -113,7 +103,7 @@ async def test_connection():
     db = TimescaleClient()
     await db.connect()
     await db.create_schema()
-    print("✅ Connected and schema created")
+    print(" Connected and schema created")
     await db.close()
 
 
@@ -125,14 +115,11 @@ async def test_full_investigation_lifecycle():
     db = TimescaleClient()
     await db.connect()
 
-    # 1. Create investigation
     inv_id = await db.create_investigation(
         input_summary="Test investigation: SSH brute force"
     )
     print(f"  Created investigation: {inv_id}")
     assert inv_id, "Should return a UUID"
-
-    # 2. Simulate agent runs
     log_run_id = await db.start_agent_run(inv_id, "LogCorrelation")
     await db.finish_agent_run(log_run_id, MOCK_LOG, duration_ms=1200)
     print(f"  Agent run saved: LogCorrelation")
@@ -140,12 +127,8 @@ async def test_full_investigation_lifecycle():
     intel_run_id = await db.start_agent_run(inv_id, "ThreatIntel")
     await db.finish_agent_run(intel_run_id, MOCK_THREAT_INTEL, duration_ms=2300)
     print(f"  Agent run saved: ThreatIntel")
-
-    # 3. Save events
     await db.save_events(inv_id, MOCK_TIMELINE)
     print(f"  Events saved: {len(MOCK_TIMELINE['timeline'])}")
-
-    # 4. Save IOCs from all agents
     await db.save_iocs(inv_id, {
         "log":          MOCK_LOG,
         "threat_intel": MOCK_THREAT_INTEL,
@@ -154,11 +137,9 @@ async def test_full_investigation_lifecycle():
     })
     print(f"  IOCs saved")
 
-    # 5. Save debate verdict
     await db.save_debate_verdict(inv_id, MOCK_DEBATE)
     print(f"  Debate verdict saved")
 
-    # 6. Update investigation status
     await db.update_investigation(
         investigation_id=inv_id,
         status="complete",
@@ -169,7 +150,6 @@ async def test_full_investigation_lifecycle():
     )
     print(f"  Investigation updated to complete")
 
-    # 7. Read back and verify
     full = await db.get_full_investigation(inv_id)
     assert full["investigation"]["status"] == "complete",  "Status should be complete"
     assert len(full["events"]) == 3,                       "Should have 3 events"
@@ -185,7 +165,7 @@ async def test_full_investigation_lifecycle():
     print(f"    agent_runs = {len(full['agent_runs'])}")
     print(f"    verdict    = {full['verdict']['final_verdict']}")
 
-    print("\n✅ Full lifecycle test passed")
+    print("\n Full lifecycle test passed")
 
     await db.close()
     return inv_id
@@ -199,14 +179,13 @@ async def test_ioc_history_search(inv_id: str):
     db = TimescaleClient()
     await db.connect()
 
-    # Search for an IP we know was saved
     results = await db.search_ioc_history("185.220.101.45")
     assert len(results) > 0, "Should find this IP in at least one investigation"
     print(f"  Found '185.220.101.45' in {len(results)} investigation(s)")
     for r in results:
         print(f"    → inv={r['investigation_id'][:8]}... verdict={r['verdict']}")
 
-    print("✅ IOC history search passed")
+    print(" IOC history search passed")
     await db.close()
 
 
@@ -232,7 +211,7 @@ async def test_ioc_type_inference():
         print(f"  {status} '{value[:40]:<40}' → {got} (expected {expected})")
         assert got == expected, f"Expected {expected} got {got} for {value}"
 
-    print("✅ IOC type inference passed")
+    print(" IOC type inference passed")
 
 
 async def test_list_investigations():
@@ -249,12 +228,12 @@ async def test_list_investigations():
         print(f"    → {inv['id'][:8]}... status={inv['status']} severity={inv['severity']}")
 
     assert len(investigations) > 0, "Should have at least one investigation from previous tests"
-    print("✅ List investigations passed")
+    print(" List investigations passed")
     await db.close()
 
 
 async def test_all():
-    print("\n🚀 Running all DB tests...\n")
+    print("\n Running all DB tests...\n")
 
     await test_connection()
     await test_ioc_type_inference()
@@ -263,7 +242,7 @@ async def test_all():
     await test_list_investigations()
 
     print("\n" + "="*50)
-    print("✅ ALL DB TESTS PASSED")
+    print(" ALL DB TESTS PASSED")
     print("="*50)
 
 

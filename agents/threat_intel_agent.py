@@ -4,6 +4,8 @@ from typing import List
 from pydantic import BaseModel, Field
 from crewai import Agent, Task, Crew
 from agents.base_agent import get_llm       
+from tenacity import retry, stop_after_attempt
+from agents.base_agent import _GroqRateLimitWait
 
 logger = logging.getLogger(__name__)
 
@@ -80,7 +82,7 @@ def build_threat_intel_task(agent: Agent, evidence: str) -> Task:
 class ThreatIntelAgent:
     def __init__(self):
         self._agent = build_threat_intel_agent()
-
+    @retry(stop=stop_after_attempt(4), wait=_GroqRateLimitWait())
     async def run(self, evidence: str) -> dict:
         """
         Run threat intelligence analysis on raw evidence.
@@ -94,8 +96,7 @@ class ThreatIntelAgent:
         try:
             task   = build_threat_intel_task(self._agent, evidence)
             crew   = Crew(agents=[self._agent], tasks=[task], verbose=False)
-            loop   = asyncio.get_event_loop()
-            output = await loop.run_in_executor(None, crew.kickoff)
+            output = await asyncio.get_running_loop().run_in_executor(None, crew.kickoff)
 
             result: ThreatIntelOutput = output.pydantic
             return {
@@ -106,9 +107,4 @@ class ThreatIntelAgent:
 
         except Exception as e:
             logger.error(f"[ThreatIntel] run() failed: {e}")
-            return {
-                **ThreatIntelOutput().model_dump(),
-                "_agent":  "ThreatIntel",
-                "_status": "error",
-                "_error":  str(e),
-            }
+            raise

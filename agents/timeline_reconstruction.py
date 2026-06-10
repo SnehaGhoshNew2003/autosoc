@@ -4,6 +4,8 @@ from typing import List, Optional
 from pydantic import BaseModel, Field
 from crewai import Agent, Task, Crew
 from agents.base_agent import get_llm
+from tenacity import retry, stop_after_attempt
+from agents.base_agent import _GroqRateLimitWait
 
 logger = logging.getLogger(__name__)
 
@@ -98,6 +100,100 @@ def build_timeline_agent() -> Agent:
         allow_delegation=False,
     )
 
+def _compress_log_for_timeline(log_correlation: dict) -> str:
+    """
+    Extract only what timeline reconstruction actually needs from log output.
+    Drops: source_coverage, per-event severity detail, raw ioc lists in events.
+    Keeps: attack vector, flags, summary, top 10 events (timestamp+stage+desc+iocs),
+           top 5 anomalies.
+    Saves ~60% of the log correlation token budget.
+    """
+    lines = []
+    lines.append(f"Attack vector: {log_correlation.get('attack_vector', 'unknown')}")
+    lines.append(f"Lateral movement: {log_correlation.get('lateral_movement', False)}")
+    lines.append(f"Exfil detected: {log_correlation.get('exfil_detected', False)}")
+    lines.append(f"Confidence: {log_correlation.get('confidence', 'low')}")
+    lines.append(f"IOCs: {', '.join(log_correlation.get('iocs', [])[:10])}")
+    lines.append(f"Summary: {log_correlation.get('summary', '')}")
+
+    events = log_correlation.get("events", [])[:10]  
+    if events:
+        lines.append("\nKEY EVENTS:")
+        for ev in events:
+            iocs = ev.get("iocs", [])
+            lines.append(
+                f"  [{ev.get('timestamp', '')}] [{ev.get('source', '?')}] "
+                f"[{ev.get('kill_chain_stage', '?').upper()}] "
+                f"{ev.get('description', '')} | iocs={iocs}"
+            )
+
+    anomalies = log_correlation.get("anomalies", [])[:5]  
+    if anomalies:
+        lines.append("\nANOMALIES:")
+        for an in anomalies:
+            lines.append(
+                f"  [{an.get('risk_level', '?').upper()}] "
+                f"{an.get('pattern', '')} — {an.get('evidence', '')}"
+            )
+
+    return "\n".join(lines)
+
+
+def _compress_intel_for_timeline(threat_intel: dict) -> str:
+    """
+    Extract only what timeline reconstruction needs from threat intel output.
+    Drops: full CVE descriptions, alias repetition, long evidence strings.
+    Keeps: summary, actors (name+confidence), TTPs (id+name+tactic only),
+           CVE ids, IOC lists, MITRE mapping.
+    Saves ~70% of the threat intel token budget.
+    """
+    lines = []
+    lines.append(f"Summary: {threat_intel.get('summary', '')}")
+
+    actors = threat_intel.get("threat_actors", [])
+    if actors:
+        actor_str = ", ".join(
+            f"{a.get('name', '?')} (conf={a.get('confidence', '?')})"
+            for a in actors
+        )
+        lines.append(f"Threat actors: {actor_str}")
+
+    ttps = threat_intel.get("ttps", [])[:8]  
+    if ttps:
+        lines.append("TTPs:")
+        for t in ttps:
+            lines.append(
+                f"  {t.get('technique_id', '')} | "
+                f"{t.get('technique_name', '')} | "
+                f"tactic={t.get('tactic', '')}"
+            )
+
+    cves = threat_intel.get("cves", [])
+    if cves:
+        cve_str = ", ".join(
+            f"{c.get('cve_id', '')} [{c.get('severity', '?')}]"
+            for c in cves[:5] 
+        )
+        lines.append(f"CVEs: {cve_str}")
+
+    iocs = threat_intel.get("iocs", {})
+    all_iocs = (
+        iocs.get("ips", [])[:5] +
+        iocs.get("domains", [])[:5] +
+        iocs.get("hashes", [])[:3] +
+        iocs.get("urls", [])[:3]
+    )
+    lines.append(f"IOCs: {', '.join(all_iocs)}")
+
+    mitre = threat_intel.get("mitre_attack", {})
+    lines.append(
+        f"MITRE tactics: {', '.join(mitre.get('tactics', []))} | "
+        f"techniques: {', '.join(mitre.get('techniques', []))} | "
+        f"phase: {mitre.get('kill_chain_phase', 'unknown')}"
+    )
+
+    return "\n".join(lines)
+
 
 def build_timeline_task(
     agent:           Agent,
@@ -105,100 +201,23 @@ def build_timeline_task(
     threat_intel:    dict,
 ) -> Task:
     """
-    Build the CrewAI Task for timeline reconstruction.
-
-    Fuses both L1 outputs into one structured prompt so the agent
-    can cross-reference timestamps with actor/TTP context.
+    REFACTORED: Compresses both upstream outputs before building the prompt.
+    Original passed full dicts as formatted strings (~6,000-8,000 tokens).
+    This version passes compressed summaries (~800-1,200 tokens).
+    Net saving: ~5,000-7,000 tokens per Timeline call.
     """
-    events_block = ""
-    if log_correlation.get("events"):
-        events_block = "CORRELATED EVENTS (from LogCorrelation agent):\n"
-        for ev in log_correlation["events"]:
-            events_block += (
-                f"  [{ev.get('timestamp', 'N/A')}] "
-                f"[{ev.get('source', '?')}] "
-                f"[{ev.get('kill_chain_stage', '?').upper()}] "
-                f"{ev.get('description', '')} "
-                f"| severity={ev.get('severity', '?')} "
-                f"| iocs={ev.get('iocs', [])}\n"
-            )
-
-    anomalies_block = ""
-    if log_correlation.get("anomalies"):
-        anomalies_block = "\nANOMALIES DETECTED:\n"
-        for an in log_correlation["anomalies"]:
-            anomalies_block += (
-                f"  [{an.get('risk_level', '?').upper()}] "
-                f"{an.get('pattern', '')} — {an.get('evidence', '')}\n"
-            )
-
-    log_summary = log_correlation.get("summary", "No log summary available.")
-    log_iocs    = log_correlation.get("iocs", [])
-    attack_vec  = log_correlation.get("attack_vector", "unknown")
-    lateral_mv  = log_correlation.get("lateral_movement", False)
-    exfil       = log_correlation.get("exfil_detected", False)
-    actors_block = ""
-    if threat_intel.get("threat_actors"):
-        actors_block = "\nTHREAT ACTORS IDENTIFIED:\n"
-        for actor in threat_intel["threat_actors"]:
-            actors_block += (
-                f"  {actor.get('name', 'Unknown')} "
-                f"(confidence={actor.get('confidence', '?')}, "
-                f"aliases={actor.get('aliases', [])})\n"
-            )
-
-    ttps_block = ""
-    if threat_intel.get("ttps"):
-        ttps_block = "\nTTPs (Tactics, Techniques, Procedures):\n"
-        for ttp in threat_intel["ttps"]:
-            ttps_block += (
-                f"  {ttp.get('technique_id', '')} | "
-                f"{ttp.get('technique_name', '')} | "
-                f"tactic={ttp.get('tactic', '')} | "
-                f"evidence={ttp.get('evidence', '')}\n"
-            )
-
-    cves_block = ""
-    if threat_intel.get("cves"):
-        cves_block = "\nCVEs REFERENCED:\n"
-        for cve in threat_intel["cves"]:
-            cves_block += (
-                f"  {cve.get('cve_id', '')} "
-                f"[{cve.get('severity', '?')}]: "
-                f"{cve.get('description', '')}\n"
-            )
-
-    mitre      = threat_intel.get("mitre_attack", {})
-    mitre_block = (
-        f"\nMITRE ATT&CK MAPPING:\n"
-        f"  Tactics:          {mitre.get('tactics', [])}\n"
-        f"  Techniques:       {mitre.get('techniques', [])}\n"
-        f"  Kill-chain phase: {mitre.get('kill_chain_phase', 'unknown')}\n"
-    )
-
-    intel_iocs    = threat_intel.get("iocs", {})
-    intel_summary = threat_intel.get("summary", "No threat intel summary available.")
+    log_block   = _compress_log_for_timeline(log_correlation)
+    intel_block = _compress_intel_for_timeline(threat_intel)
 
     return Task(
         description=(
-            "You are reconstructing the full attack timeline from two evidence sources.\n\n"
+            "Reconstruct the full attack timeline from two compressed evidence sources.\n\n"
 
             "═══ LOG CORRELATION EVIDENCE ═══\n"
-            f"Attack vector:             {attack_vec}\n"
-            f"Lateral movement detected: {lateral_mv}\n"
-            f"Exfiltration detected:     {exfil}\n"
-            f"Log IOCs:                  {log_iocs}\n"
-            f"Log summary:               {log_summary}\n\n"
-            f"{events_block}"
-            f"{anomalies_block}\n"
+            f"{log_block}\n\n"
 
             "═══ THREAT INTELLIGENCE EVIDENCE ═══\n"
-            f"Threat intel summary: {intel_summary}\n"
-            f"Threat intel IOCs:    {intel_iocs}\n"
-            f"{actors_block}"
-            f"{ttps_block}"
-            f"{cves_block}"
-            f"{mitre_block}\n"
+            f"{intel_block}\n\n"
 
             "═══ YOUR TASK ═══\n"
             "1. Fuse BOTH evidence sources into ONE unified chronological timeline.\n"
@@ -220,7 +239,8 @@ def build_timeline_task(
             "timeline (events sorted by timestamp), "
             "stage_summaries (one entry per kill-chain stage), "
             "attacker_profile, timeline_gaps, "
-            "lateral_movement / privilege_escalation / data_exfiltrated / persistence_established flags, "
+            "lateral_movement / privilege_escalation / data_exfiltrated / "
+            "persistence_established flags, "
             "furthest_stage_reached, all_techniques (deduplicated ATT&CK IDs), "
             "all_iocs (deduplicated), severity (critical|high|medium|low), "
             "and a 3-4 sentence executive narrative."
@@ -228,7 +248,6 @@ def build_timeline_task(
         agent=agent,
         output_pydantic=TimelineReconstructionOutput,
     )
-
 class TimelineReconstructionAgent:
     """
     Layer 2 agent — first chain in the pipeline.
@@ -244,7 +263,7 @@ class TimelineReconstructionAgent:
 
     def __init__(self):
         self._agent = build_timeline_agent()
-
+    @retry(stop=stop_after_attempt(4), wait=_GroqRateLimitWait())
     async def run(
         self,
         log_correlation_result: dict,
@@ -292,9 +311,7 @@ class TimelineReconstructionAgent:
                 threat_intel=threat_intel_result,
             )
             crew   = Crew(agents=[self._agent], tasks=[task], verbose=False)
-            loop   = asyncio.get_event_loop()
-            output = await loop.run_in_executor(None, crew.kickoff)
-
+            output = await asyncio.get_running_loop().run_in_executor(None, crew.kickoff)
             result: TimelineReconstructionOutput = output.pydantic
             return {
                 **result.model_dump(),
@@ -304,9 +321,4 @@ class TimelineReconstructionAgent:
 
         except Exception as e:
             logger.error(f"[TimelineReconstruction] run() failed: {e}")
-            return {
-                **TimelineReconstructionOutput().model_dump(),
-                "_agent":  "TimelineReconstruction",
-                "_status": "error",
-                "_error":  str(e),
-            }
+            raise
