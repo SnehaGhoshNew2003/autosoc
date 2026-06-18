@@ -424,18 +424,26 @@ class TimescaleClient:
         """
         rows = []
 
+        # Replace the _add helper inside save_iocs:
+
         def _add(ioc_type: str, value: str, source_agent: str, context: str = ""):
-            """Helper to append a deduped IOC row."""
             value = value.strip()
             if not value:
                 return
-            rows.append((
-                investigation_id,
-                ioc_type,
-                value,
-                source_agent,
-                context,
-            ))
+
+            # Normalise IP:port → just the IP, reclassify if needed
+            if ":" in value and ioc_type in ("unknown", "ip"):
+                ip_candidate = value.split(":")[0]
+                parts = ip_candidate.split(".")
+                if len(parts) == 4 and all(p.isdigit() and 0 <= int(p) <= 255 for p in parts):
+                    value    = ip_candidate   # strip the port
+                    ioc_type = "ip"
+
+            # Re-infer if still unknown
+            if ioc_type == "unknown":
+                ioc_type = _infer_ioc_type(value)
+
+            rows.append((investigation_id, ioc_type, value, source_agent, context))
 
         ti = agent_results.get("threat_intel", {})
         if ti.get("_status") == "complete":
@@ -722,34 +730,62 @@ class TimescaleClient:
             "verdict":       verdict,
         }
 
+# Replace the entire _infer_ioc_type function
+
 def _infer_ioc_type(value: str) -> str:
     """
-    Guess the IOC type from its format.
-    Used when the agent returns a flat list without type labels.
-
-    Rules (in order):
-      - 4 octets separated by dots → IP address
-      - 32/40/64 hex chars         → file hash (MD5/SHA1/SHA256)
-      - starts with http(s)://     → URL
-      - starts with / or X:\       → file path
-      - contains a dot, first char not a digit → domain
-      - everything else            → unknown
+    Infer IOC type from value format.
+    Order matters — most specific checks first.
     """
     v = value.strip()
-    parts = v.split(".")
-    if len(parts) == 4 and all(p.isdigit() for p in parts):
-        return "ip"
+    if not v:
+        return "unknown"
 
-    if len(v) in (32, 40, 64) and all(c in "0123456789abcdefABCDEF" for c in v):
-        return "hash"
-
-    if v.startswith("http://") or v.startswith("https://"):
-        return "url"
-
+    # ── File paths (Windows or Unix) — check BEFORE domain ── #
     if v.startswith("/") or (len(v) > 2 and v[1] == ":" and v[2] == "\\"):
         return "file_path"
 
-    if "." in v and not v[0].isdigit():
+    # ── Executable / DLL / script filenames — NOT domains ── #
+    _exe_extensions = (
+        ".exe", ".dll", ".bat", ".cmd", ".ps1", ".vbs",
+        ".js", ".jar", ".sh", ".bin", ".msi", ".scr",
+        ".xlsm", ".docm", ".xlsb",
+    )
+    lower = v.lower()
+    if any(lower.endswith(ext) for ext in _exe_extensions):
+        return "file_path"
+
+    # ── Email addresses — NOT domains ── #
+    if "@" in v and "." in v.split("@")[-1]:
+        return "email"
+
+    # ── URL ── #
+    if v.startswith("http://") or v.startswith("https://"):
+        return "url"
+
+    # ── IP:port — strip port, classify as IP ── #
+    ip_part = v.split(":")[0] if ":" in v else v
+    parts = ip_part.split(".")
+    if len(parts) == 4 and all(p.isdigit() and 0 <= int(p) <= 255 for p in parts):
+        return "ip"
+
+    # ── Hash: 32 (MD5), 40 (SHA1), 64 (SHA256) hex chars ── #
+    if len(v) in (32, 40, 64) and all(c in "0123456789abcdefABCDEF" for c in v):
+        return "hash"
+
+    # ── Registry keys ── #
+    registry_prefixes = ("HKEY_", "HKLM\\", "HKCU\\", "HKU\\", "HKCR\\")
+    if any(v.upper().startswith(p) for p in registry_prefixes):
+        return "registry_key"
+
+    # ── Domain: has a dot, no spaces, first char not digit,
+    #    not an exe extension already handled above ── #
+    if (
+        "." in v
+        and " " not in v
+        and not v[0].isdigit()
+        and not any(lower.endswith(ext) for ext in _exe_extensions)
+    ):
         return "domain"
 
     return "unknown"
