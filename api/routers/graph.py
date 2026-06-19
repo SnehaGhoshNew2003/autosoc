@@ -3,6 +3,7 @@
 # GET /api/v1/graph/{investigation_id}/stats      — node/relationship counts
 # GET /api/v1/graph/{investigation_id}/attack-path — ordered kill-chain path
 # GET /api/v1/graph/{investigation_id}/iocs        — all IOC nodes from Neo4j
+# GET /api/v1/graph/{investigation_id}/full        — full subgraph (nodes + rels)
 # DELETE /api/v1/graph/clear                       — wipe all graph data
 
 import logging
@@ -121,6 +122,109 @@ async def get_graph_iocs(
         neo4j.close()
         return iocs
     except Exception as e:
+        raise HTTPException(status_code=503, detail=f"Neo4j unavailable: {e}")
+
+
+@router.get(
+    "/{investigation_id}/full",
+    summary="Get full Neo4j subgraph — all nodes AND relationships",
+    description=(
+        "Returns every node and relationship in the Neo4j graph for this "
+        "investigation. Used by the graph visualization to render the full "
+        "attack path with all entity types and relationship types."
+    ),
+)
+async def get_full_graph(
+    investigation_id: str,
+    db:               TimescaleClient = Depends(get_db),
+):
+    inv = await db.get_investigation(investigation_id)
+    if not inv:
+        raise HTTPException(status_code=404, detail="Investigation not found")
+
+    try:
+        neo4j = _get_neo4j()
+
+        # Fetch all nodes with their labels and properties
+        nodes_result = neo4j._run("""
+            MATCH (n)
+            OPTIONAL MATCH (n)-[r]-()
+            RETURN n, collect(DISTINCT type(r)) AS rel_types
+        """)
+
+        nodes: list[dict] = []
+        node_ids: set[str] = set()
+
+        for row in nodes_result:
+            n = row["n"]
+            nid = str(n.get("id", n.get("name", "")))
+            if not nid or nid in node_ids:
+                continue
+            node_ids.add(nid)
+
+            labels = list(n.labels) if hasattr(n, "labels") else []
+            props = dict(n)
+            props.pop("id", None)
+            props.pop("name", None)
+
+            # Determine primary label
+            primary = "Unknown"
+            for lbl in labels:
+                if lbl in ("IPAddress", "Domain", "FileHash", "ThreatActor",
+                           "Technique", "Malware", "KillChainEvent", "CVE"):
+                    primary = lbl
+                    break
+            if primary == "Unknown" and labels:
+                primary = labels[0]
+
+            display_label = n.get("name") or n.get("value") or n.get("stage") or primary
+            if isinstance(display_label, str) and len(display_label) > 30:
+                display_label = display_label[:27] + "..."
+
+            nodes.append({
+                "id": nid,
+                "label": display_label,
+                "type": primary,
+                "labels": labels,
+                "properties": props,
+            })
+
+        # Fetch all relationships
+        rels_result = neo4j._run("""
+            MATCH (a)-[r]->(b)
+            RETURN
+                id(a) AS src_id,
+                id(b) AS dst_id,
+                type(r) AS type,
+                properties(r) AS props
+        """)
+
+        relationships: list[dict] = []
+        for row in rels_result:
+            src = str(row["src_id"])
+            dst = str(row["dst_id"])
+            rel_type = row["type"] or "RELATED"
+            props = row["props"] or {}
+
+            if src in node_ids and dst in node_ids:
+                relationships.append({
+                    "source": src,
+                    "target": dst,
+                    "type": rel_type,
+                    "properties": props,
+                })
+
+        neo4j.close()
+
+        return {
+            "nodes": nodes,
+            "relationships": relationships,
+            "node_count": len(nodes),
+            "relationship_count": len(relationships),
+        }
+
+    except Exception as e:
+        logger.error(f"[Graph] full graph failed: {e}")
         raise HTTPException(status_code=503, detail=f"Neo4j unavailable: {e}")
 
 
