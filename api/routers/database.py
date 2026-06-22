@@ -1,17 +1,3 @@
-# api/routers/database.py
-#
-# Direct TimescaleDB inspection and management endpoints.
-# Mirrors what the Neo4j graph router does, but for TimescaleDB.
-#
-# GET    /api/v1/database/stats               — row counts per table
-# GET    /api/v1/database/investigations      — raw investigation rows
-# GET    /api/v1/database/agent-runs/{inv_id} — raw agent_runs rows
-# GET    /api/v1/database/events/{inv_id}     — raw events rows
-# GET    /api/v1/database/iocs/{inv_id}       — raw iocs rows
-# GET    /api/v1/database/verdicts/{inv_id}   — raw debate_verdicts row
-# DELETE /api/v1/database/investigations/{id} — hard delete
-# DELETE /api/v1/database/clear               — wipe all data (DANGEROUS)
-
 import logging
 from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Query

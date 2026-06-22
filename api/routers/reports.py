@@ -1,9 +1,3 @@
-# api/routers/reports.py
-#
-# GET /api/v1/reports/{investigation_id}           — get structured report
-# GET /api/v1/reports/{investigation_id}/markdown  — get raw markdown text
-# GET /api/v1/reports/{investigation_id}/verdict   — get debate verdict
-
 import json
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import PlainTextResponse
@@ -116,7 +110,6 @@ async def get_verdict(
             detail="Verdict not yet available. Check /pipeline/{id}/status.",
         )
 
-    # Deserialize JSONB arrays if stored as strings
     def _parse_list(val):
         if isinstance(val, str):
             try:

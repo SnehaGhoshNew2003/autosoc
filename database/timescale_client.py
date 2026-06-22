@@ -231,7 +231,60 @@ class TimescaleClient:
                 ON iocs (ioc_type, first_seen DESC);
             """)
 
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS chat_conversations (
+                    id                UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    updated_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    title             TEXT NOT NULL DEFAULT 'New Chat',
+                    is_deleted        BOOLEAN NOT NULL DEFAULT FALSE,
+                    investigation_id  UUID REFERENCES investigations(id) ON DELETE SET NULL
+                );
+            """)
+
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS chat_messages (
+                    id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    conversation_id UUID NOT NULL REFERENCES chat_conversations(id) ON DELETE CASCADE,
+                    role            TEXT NOT NULL,
+                    content         TEXT NOT NULL,
+                    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                );
+            """)
+
+            await conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_chat_conv_active
+                ON chat_conversations (is_deleted, updated_at DESC);
+            """)
+
+            await conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_chat_msg_conv
+                ON chat_messages (conversation_id, created_at ASC);
+            """)
+
         logger.info("[TimescaleDB] Schema ready")
+
+    async def reclassify_all_iocs(self):
+        """
+        Re-infer ioc_type for all existing IOCs based on their actual value.
+        Fixes misclassifications from old code that overrode agent labels.
+        Safe to call on every startup — only updates rows where type changed.
+        """
+        rows = await self._fetch("SELECT id::TEXT, value FROM iocs")
+        logger.info(f"[TimescaleDB] reclassify_all_iocs: found {len(rows)} rows in iocs table")
+        updated = 0
+        for row in rows:
+            correct_type = _infer_ioc_type(row["value"])
+            result = await self._execute(
+                "UPDATE iocs SET ioc_type = $1 WHERE id = $2::UUID AND ioc_type != $1",
+                correct_type, row["id"],
+            )
+            if result == "UPDATE 1":
+                updated += 1
+        if updated:
+            logger.info(f"[TimescaleDB] Reclassified {updated} IOC types based on actual values")
+        else:
+            logger.info(f"[TimescaleDB] No IOC types needed reclassification (0 updates out of {len(rows)} rows)")
 
     async def create_investigation(self, input_summary: str = "") -> str:
         """
@@ -424,22 +477,19 @@ class TimescaleClient:
         """
         rows = []
 
-        # Replace the _add helper inside save_iocs:
 
         def _add(ioc_type: str, value: str, source_agent: str, context: str = ""):
             value = value.strip()
             if not value:
                 return
 
-            # Normalise IP:port → just the IP, reclassify if needed
-            if ":" in value and ioc_type in ("unknown", "ip"):
+            if ":" in value:
                 ip_candidate = value.split(":")[0]
                 parts = ip_candidate.split(".")
                 if len(parts) == 4 and all(p.isdigit() and 0 <= int(p) <= 255 for p in parts):
-                    value    = ip_candidate   # strip the port
-                    ioc_type = "ip"
+                    value = ip_candidate   
+                    ioc_type = "ip"        
 
-            # Re-infer if still unknown
             if ioc_type == "unknown":
                 ioc_type = _infer_ioc_type(value)
 
@@ -709,6 +759,67 @@ class TimescaleClient:
             investigation_id,
         )
 
+    async def create_conversation(self, title: str = "New Chat", investigation_id: Optional[str] = None) -> str:
+        row = await self._fetchrow(
+            """
+            INSERT INTO chat_conversations (title, investigation_id)
+            VALUES ($1, $2::UUID)
+            RETURNING id::TEXT
+            """,
+            title, investigation_id,
+        )
+        return row["id"]
+
+    async def list_conversations(self, include_deleted: bool = False) -> list:
+        if include_deleted:
+            return await self._fetch(
+                "SELECT id::TEXT, created_at, updated_at, title, is_deleted, investigation_id::TEXT "
+                "FROM chat_conversations ORDER BY updated_at DESC"
+            )
+        return await self._fetch(
+            "SELECT id::TEXT, created_at, updated_at, title, is_deleted, investigation_id::TEXT "
+            "FROM chat_conversations WHERE is_deleted = FALSE ORDER BY updated_at DESC"
+        )
+
+    async def get_conversation(self, conversation_id: str) -> Optional[dict]:
+        return await self._fetchrow(
+            "SELECT id::TEXT, created_at, updated_at, title, is_deleted, investigation_id::TEXT "
+            "FROM chat_conversations WHERE id = $1::UUID",
+            conversation_id,
+        )
+
+    async def soft_delete_conversation(self, conversation_id: str) -> bool:
+        result = await self._execute(
+            "UPDATE chat_conversations SET is_deleted = TRUE, updated_at = NOW() "
+            "WHERE id = $1::UUID",
+            conversation_id,
+        )
+        return result == "UPDATE 1"
+
+    async def update_conversation_title(self, conversation_id: str, title: str):
+        await self._execute(
+            "UPDATE chat_conversations SET title = $1, updated_at = NOW() WHERE id = $2::UUID",
+            title, conversation_id,
+        )
+
+    async def add_chat_message(self, conversation_id: str, role: str, content: str) -> str:
+        row = await self._fetchrow(
+            """
+            INSERT INTO chat_messages (conversation_id, role, content)
+            VALUES ($1::UUID, $2, $3)
+            RETURNING id::TEXT
+            """,
+            conversation_id, role, content,
+        )
+        return row["id"]
+
+    async def get_chat_messages(self, conversation_id: str) -> list:
+        return await self._fetch(
+            "SELECT id::TEXT, role, content, created_at "
+            "FROM chat_messages WHERE conversation_id = $1::UUID ORDER BY created_at ASC",
+            conversation_id,
+        )
+
     async def get_full_investigation(self, investigation_id: str) -> dict:
         """
         Fetch everything about an investigation in one call.
@@ -730,8 +841,6 @@ class TimescaleClient:
             "verdict":       verdict,
         }
 
-# Replace the entire _infer_ioc_type function
-
 def _infer_ioc_type(value: str) -> str:
     """
     Infer IOC type from value format.
@@ -741,11 +850,9 @@ def _infer_ioc_type(value: str) -> str:
     if not v:
         return "unknown"
 
-    # ── File paths (Windows or Unix) — check BEFORE domain ── #
     if v.startswith("/") or (len(v) > 2 and v[1] == ":" and v[2] == "\\"):
         return "file_path"
 
-    # ── Executable / DLL / script filenames — NOT domains ── #
     _exe_extensions = (
         ".exe", ".dll", ".bat", ".cmd", ".ps1", ".vbs",
         ".js", ".jar", ".sh", ".bin", ".msi", ".scr",
@@ -755,31 +862,30 @@ def _infer_ioc_type(value: str) -> str:
     if any(lower.endswith(ext) for ext in _exe_extensions):
         return "file_path"
 
-    # ── Email addresses — NOT domains ── #
     if "@" in v and "." in v.split("@")[-1]:
         return "email"
 
-    # ── URL ── #
     if v.startswith("http://") or v.startswith("https://"):
         return "url"
 
-    # ── IP:port — strip port, classify as IP ── #
     ip_part = v.split(":")[0] if ":" in v else v
     parts = ip_part.split(".")
     if len(parts) == 4 and all(p.isdigit() and 0 <= int(p) <= 255 for p in parts):
         return "ip"
 
-    # ── Hash: 32 (MD5), 40 (SHA1), 64 (SHA256) hex chars ── #
     if len(v) in (32, 40, 64) and all(c in "0123456789abcdefABCDEF" for c in v):
         return "hash"
+    if len(v) >= 8 and all(c in "0123456789abcdefABCDEF" for c in v):
+        return "hash"
 
-    # ── Registry keys ── #
     registry_prefixes = ("HKEY_", "HKLM\\", "HKCU\\", "HKU\\", "HKCR\\")
     if any(v.upper().startswith(p) for p in registry_prefixes):
         return "registry_key"
 
-    # ── Domain: has a dot, no spaces, first char not digit,
-    #    not an exe extension already handled above ── #
+    mutex_prefixes = ("Global\\", "Local\\", "mutex_", "Mutex_")
+    if any(v.startswith(p) for p in mutex_prefixes) or "\\" in v:
+        return "mutex"
+
     if (
         "." in v
         and " " not in v

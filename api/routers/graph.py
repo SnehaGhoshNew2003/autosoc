@@ -1,12 +1,5 @@
-# api/routers/graph.py
-#
-# GET /api/v1/graph/{investigation_id}/stats      — node/relationship counts
-# GET /api/v1/graph/{investigation_id}/attack-path — ordered kill-chain path
-# GET /api/v1/graph/{investigation_id}/iocs        — all IOC nodes from Neo4j
-# GET /api/v1/graph/{investigation_id}/full        — full subgraph (nodes + rels)
-# DELETE /api/v1/graph/clear                       — wipe all graph data
-
 import logging
+from typing import Any
 from fastapi import APIRouter, Depends, HTTPException
 from api.dependencies.database import get_db
 from api.models.schemas import GraphStatsResponse, StatusResponse
@@ -22,6 +15,20 @@ def _get_neo4j() -> Neo4jClient:
     return Neo4jClient()
 
 
+async def _get_events_from_db(db: TimescaleClient, investigation_id: str) -> list:
+    """Fetch kill-chain events from TimescaleDB as a fallback."""
+    events = await db.get_events(investigation_id)
+    return [
+        {
+            "timestamp": str(ev.get("event_time", "")),
+            "stage": ev.get("stage", "unknown"),
+            "description": ev.get("description", ""),
+            "technique_id": ev.get("technique_id", ""),
+        }
+        for ev in events
+    ]
+
+
 @router.get(
     "/{investigation_id}/stats",
     response_model=GraphStatsResponse,
@@ -31,10 +38,6 @@ async def get_graph_stats(
     investigation_id: str,
     db:               TimescaleClient = Depends(get_db),
 ):
-    """
-    Returns counts of each node type and relationship type in Neo4j,
-    plus the ordered attack path for this investigation.
-    """
     inv = await db.get_investigation(investigation_id)
     if not inv:
         raise HTTPException(status_code=404, detail="Investigation not found")
@@ -42,25 +45,46 @@ async def get_graph_stats(
     try:
         neo4j = _get_neo4j()
 
+        all_events = neo4j._run("MATCH (n:KillChainEvent) RETURN count(n) AS count")
+        neo4j_has_data = all_events and all_events[0].get("count", 0) > 0
+
+        if not neo4j_has_data:
+
+            logger.info(f"[Graph] Neo4j empty for {investigation_id[:8]}..., falling back to TimescaleDB")
+            events = await _get_events_from_db(db, investigation_id)
+
+            neo4j.close()
+
+            return GraphStatsResponse(
+                investigation_id=investigation_id,
+                node_counts={"KillChainEvent": len(events)},
+                relationship_counts={},
+                attack_path=events,
+            )
+
         node_counts = {}
         for label in [
             "IPAddress", "Domain", "FileHash", "ThreatActor",
             "Technique", "Malware", "CVE", "KillChainEvent",
         ]:
-            result = neo4j._run(
-                f"MATCH (n:{label}) RETURN count(n) AS count"
-            )
-            node_counts[label] = result[0]["count"] if result else 0
+            if label == "KillChainEvent":
+                result = neo4j._run(
+                    "MATCH (n:KillChainEvent) WHERE n.investigation_id = $inv_id OR n.investigationId = $inv_id RETURN count(n) AS count",
+                    {"inv_id": investigation_id}
+                )
+                filtered_count = result[0]["count"] if result else 0
+                node_counts[label] = filtered_count if filtered_count > 0 else all_events[0]["count"]
+            else:
+                result = neo4j._run(f"MATCH (n:{label}) RETURN count(n) AS count")
+                node_counts[label] = result[0]["count"] if result else 0
 
         rel_counts = {}
         for rel in ["USES", "INVOLVES", "PRECEDES", "CONNECTS_TO",
                     "ATTRIBUTED_TO", "DEPLOYS", "EXPLOITS"]:
-            result = neo4j._run(
-                f"MATCH ()-[r:{rel}]->() RETURN count(r) AS count"
-            )
+            result = neo4j._run(f"MATCH ()-[r:{rel}]->() RETURN count(r) AS count")
             rel_counts[rel] = result[0]["count"] if result else 0
 
-        attack_path = neo4j.get_attack_path()
+        attack_path = neo4j.get_attack_path(investigation_id=investigation_id)
         neo4j.close()
 
         return GraphStatsResponse(
@@ -71,7 +95,17 @@ async def get_graph_stats(
         )
     except Exception as e:
         logger.error(f"[Graph] stats failed: {e}")
-        raise HTTPException(status_code=503, detail=f"Neo4j unavailable: {e}")
+
+        try:
+            events = await _get_events_from_db(db, investigation_id)
+            return GraphStatsResponse(
+                investigation_id=investigation_id,
+                node_counts={"KillChainEvent": len(events)},
+                relationship_counts={},
+                attack_path=events,
+            )
+        except:
+            raise HTTPException(status_code=503, detail=f"Graph unavailable: {e}")
 
 
 @router.get(
@@ -83,21 +117,26 @@ async def get_attack_path(
     investigation_id: str,
     db:               TimescaleClient = Depends(get_db),
 ):
-    """
-    Returns the kill-chain event sequence ordered by timestamp.
-    Each entry contains: timestamp, stage, description, technique_id.
-    """
     inv = await db.get_investigation(investigation_id)
     if not inv:
         raise HTTPException(status_code=404, detail="Investigation not found")
 
     try:
         neo4j = _get_neo4j()
-        path = neo4j.get_attack_path()
+        path = neo4j.get_attack_path(investigation_id=investigation_id)
         neo4j.close()
+
+        if not path:
+            logger.info(f"[Graph] Neo4j empty for attack-path {investigation_id[:8]}..., falling back to TimescaleDB")
+            path = await _get_events_from_db(db, investigation_id)
+
         return path
     except Exception as e:
-        raise HTTPException(status_code=503, detail=f"Neo4j unavailable: {e}")
+        logger.error(f"[Graph] attack-path failed: {e}")
+        try:
+            return await _get_events_from_db(db, investigation_id)
+        except:
+            raise HTTPException(status_code=503, detail=f"Graph unavailable: {e}")
 
 
 @router.get(
@@ -108,10 +147,6 @@ async def get_graph_iocs(
     investigation_id: str,
     db:               TimescaleClient = Depends(get_db),
 ):
-    """
-    Returns all IP, domain, and hash nodes currently in the Neo4j graph.
-    Note: Neo4j stores IOCs globally (not per-investigation).
-    """
     inv = await db.get_investigation(investigation_id)
     if not inv:
         raise HTTPException(status_code=404, detail="Investigation not found")
@@ -130,8 +165,7 @@ async def get_graph_iocs(
     summary="Get full Neo4j subgraph — all nodes AND relationships",
     description=(
         "Returns every node and relationship in the Neo4j graph for this "
-        "investigation. Used by the graph visualization to render the full "
-        "attack path with all entity types and relationship types."
+        "investigation. Falls back to TimescaleDB events if Neo4j is empty."
     ),
 )
 async def get_full_graph(
@@ -144,88 +178,166 @@ async def get_full_graph(
 
     try:
         neo4j = _get_neo4j()
+        all_events = neo4j._run("MATCH (n:KillChainEvent) RETURN count(n) AS count")
+        neo4j_empty = not all_events or all_events[0].get("count", 0) == 0
 
-        # Fetch all nodes with their labels and properties
-        nodes_result = neo4j._run("""
-            MATCH (n)
-            OPTIONAL MATCH (n)-[r]-()
-            RETURN n, collect(DISTINCT type(r)) AS rel_types
-        """)
+        if neo4j_empty:
+            neo4j.close()
+            events = await db.get_events(investigation_id)
+            nodes = []
+            for ev in events:
+                eid = ev.get("id", "")
+                ts = str(ev.get("event_time", ""))
+                stage = ev.get("stage", "unknown")
+                desc = ev.get("description", "")
+                tech = ev.get("technique_id", "")
+                nodes.append({
+                    "id": eid,
+                    "label": f"[{stage}] {desc[:40] if desc else '—'}",
+                    "type": "KillChainEvent",
+                    "labels": ["KillChainEvent"],
+                    "properties": {
+                        "event_id": eid,
+                        "timestamp": ts,
+                        "stage": stage,
+                        "description": desc,
+                        "technique_id": tech,
+                    }
+                })
+            relationships = []
+            for i in range(len(nodes) - 1):
+                relationships.append({
+                    "source": nodes[i]["id"],
+                    "target": nodes[i + 1]["id"],
+                    "type": "PRECEDES",
+                    "properties": {},
+                })
 
-        nodes: list[dict] = []
-        node_ids: set[str] = set()
+            return {
+                "nodes": nodes,
+                "relationships": relationships,
+                "node_count": len(nodes),
+                "relationship_count": len(relationships),
+            }
+
+        filtered_ids = neo4j._run(
+            "MATCH (e:KillChainEvent) WHERE e.investigation_id = $inv_id OR e.investigationId = $inv_id RETURN e.event_id AS eid",
+            {"inv_id": investigation_id}
+        )
+        inv_event_ids = {r["eid"] for r in filtered_ids if r.get("eid")}
+        use_all_events = len(inv_event_ids) == 0
+
+        if use_all_events:
+            all_ids_result = neo4j._run("MATCH (e:KillChainEvent) RETURN e.event_id AS eid")
+            inv_event_ids = {r["eid"] for r in all_ids_result if r.get("eid")}
+
+        event_clause = "WHERE true" if use_all_events else "WHERE e.investigation_id = $inv_id OR e.investigationId = $inv_id"
+
+        nodes_result = neo4j._run(f"""
+            MATCH (e:KillChainEvent)
+            {event_clause}
+            OPTIONAL MATCH (e)-[r]-(connected)
+            RETURN
+                labels(e)                                        AS src_labels,
+                e.event_id                                       AS src_id,
+                e.timestamp                                      AS src_ts,
+                e.stage                                          AS src_stage,
+                e.description                                    AS src_desc,
+                e.technique_id                                   AS src_tech,
+                labels(connected)                                AS dst_labels,
+                CASE
+                    WHEN connected.ip       IS NOT NULL THEN connected.ip
+                    WHEN connected.name     IS NOT NULL THEN connected.name
+                    WHEN connected.hash     IS NOT NULL THEN connected.hash
+                    WHEN connected.technique_id IS NOT NULL THEN connected.technique_id
+                    WHEN connected.family   IS NOT NULL THEN connected.family
+                    WHEN connected.cve_id   IS NOT NULL THEN connected.cve_id
+                    WHEN connected.event_id IS NOT NULL THEN connected.event_id
+                    ELSE toString(id(connected))
+                END                                              AS dst_id,
+                type(r)                                          AS rel_type
+        """, {"inv_id": investigation_id} if not use_all_events else {})
+
+        node_map: dict[str, dict] = {}
+        relationships: list[dict] = []
+        rel_set: set[tuple[str, str, str]] = set()
 
         for row in nodes_result:
-            n = row["n"]
-            nid = str(n.get("id", n.get("name", "")))
-            if not nid or nid in node_ids:
-                continue
-            node_ids.add(nid)
+            src_id = row["src_id"] or ""
+            if src_id and src_id not in node_map:
+                node_map[src_id] = {
+                    "id": src_id,
+                    "label": f"[{row.get('src_stage', '')}] {row.get('src_desc', '')[:40]}",
+                    "type": "KillChainEvent",
+                    "labels": ["KillChainEvent"],
+                    "properties": {
+                        "event_id": src_id,
+                        "timestamp": row.get("src_ts", ""),
+                        "stage": row.get("src_stage", ""),
+                        "description": row.get("src_desc", ""),
+                        "technique_id": row.get("src_tech", ""),
+                    }
+                }
 
-            labels = list(n.labels) if hasattr(n, "labels") else []
-            props = dict(n)
-            props.pop("id", None)
-            props.pop("name", None)
+            dst_id = row["dst_id"] or ""
+            dst_labels = row["dst_labels"] or []
+            rel_type = row["rel_type"] or ""
 
-            # Determine primary label
-            primary = "Unknown"
-            for lbl in labels:
-                if lbl in ("IPAddress", "Domain", "FileHash", "ThreatActor",
-                           "Technique", "Malware", "KillChainEvent", "CVE"):
-                    primary = lbl
-                    break
-            if primary == "Unknown" and labels:
-                primary = labels[0]
+            if dst_id and dst_id not in node_map:
+                primary = "Unknown"
+                for lbl in dst_labels:
+                    if lbl in ("IPAddress", "Domain", "FileHash", "ThreatActor",
+                               "Technique", "Malware", "CVE"):
+                        primary = lbl
+                        break
+                if primary == "Unknown" and dst_labels:
+                    primary = dst_labels[0]
+                display_label = dst_id[:27] + "..." if len(dst_id) > 30 else dst_id
+                node_map[dst_id] = {
+                    "id": dst_id,
+                    "label": display_label,
+                    "type": primary,
+                    "labels": dst_labels,
+                    "properties": {},
+                }
 
-            display_label = n.get("name") or n.get("value") or n.get("stage") or primary
-            if isinstance(display_label, str) and len(display_label) > 30:
-                display_label = display_label[:27] + "..."
+            if src_id and dst_id and rel_type:
+                rel_key = (src_id, dst_id, rel_type)
+                if rel_key not in rel_set:
+                    rel_set.add(rel_key)
+                    relationships.append({"source": src_id, "target": dst_id, "type": rel_type, "properties": {}})
 
-            nodes.append({
-                "id": nid,
-                "label": display_label,
-                "type": primary,
-                "labels": labels,
-                "properties": props,
-            })
+        if use_all_events:
+            preceding = neo4j._run("MATCH (a:KillChainEvent)-[r:PRECEDES]->(b:KillChainEvent) RETURN a.event_id AS src, b.event_id AS dst")
+        else:
+            preceding = neo4j._run("""
+                MATCH (a:KillChainEvent)-[r:PRECEDES]->(b:KillChainEvent)
+                WHERE (a.investigation_id = $inv_id OR a.investigationId = $inv_id)
+                  AND (b.investigation_id = $inv_id OR b.investigationId = $inv_id)
+                RETURN a.event_id AS src, b.event_id AS dst
+            """, {"inv_id": investigation_id})
 
-        # Fetch all relationships
-        rels_result = neo4j._run("""
-            MATCH (a)-[r]->(b)
-            RETURN
-                id(a) AS src_id,
-                id(b) AS dst_id,
-                type(r) AS type,
-                properties(r) AS props
-        """)
-
-        relationships: list[dict] = []
-        for row in rels_result:
-            src = str(row["src_id"])
-            dst = str(row["dst_id"])
-            rel_type = row["type"] or "RELATED"
-            props = row["props"] or {}
-
-            if src in node_ids and dst in node_ids:
-                relationships.append({
-                    "source": src,
-                    "target": dst,
-                    "type": rel_type,
-                    "properties": props,
-                })
+        for row in preceding:
+            src = row["src"] or ""
+            dst = row["dst"] or ""
+            if src in inv_event_ids and dst in inv_event_ids:
+                rel_key = (src, dst, "PRECEDES")
+                if rel_key not in rel_set:
+                    rel_set.add(rel_key)
+                    relationships.append({"source": src, "target": dst, "type": "PRECEDES", "properties": {}})
 
         neo4j.close()
 
         return {
-            "nodes": nodes,
+            "nodes": list(node_map.values()),
             "relationships": relationships,
-            "node_count": len(nodes),
+            "node_count": len(node_map),
             "relationship_count": len(relationships),
         }
 
     except Exception as e:
         logger.error(f"[Graph] full graph failed: {e}")
-        raise HTTPException(status_code=503, detail=f"Neo4j unavailable: {e}")
+        raise HTTPException(status_code=503, detail=f"Graph unavailable: {e}")
 
 
 @router.delete(

@@ -1,5 +1,3 @@
-# api/routers/iocs.py — complete replacement
-
 import logging
 from fastapi import APIRouter, Depends, HTTPException, Query
 from api.dependencies.database import get_db
@@ -19,6 +17,74 @@ _VALID_IOC_TYPES = {
     "ip", "domain", "hash", "url", "file_path",
     "mutex", "email", "registry_key", "unknown",
 }
+
+
+@router.get(
+    "/all",
+    response_model=IOCListResponse,
+    summary="Get ALL IOCs across all investigations and all types",
+    description=(
+        "Returns every IOC regardless of type. "
+        "Used by the IOC Library 'All' tab."
+    ),
+)
+async def get_all_iocs(
+    limit: int = Query(default=500, ge=1, le=5000),
+    db: TimescaleClient = Depends(get_db),
+):
+    rows = await db._fetch(
+        """
+        SELECT id::TEXT, investigation_id::TEXT, ioc_type,
+               value, source_agent, context, first_seen
+        FROM iocs
+        ORDER BY first_seen DESC
+        LIMIT $1
+        """,
+        limit,
+    )
+    total_row = await db._fetchrow("SELECT COUNT(*)::TEXT AS total FROM iocs")
+    total = int(total_row["total"]) if total_row else 0
+    items = [IOCItem(**r) for r in rows]
+    return IOCListResponse(iocs=items, total=total)
+
+
+@router.get(
+    "/all/type/{ioc_type}",
+    response_model=IOCListResponse,
+    summary="Get all IOCs of a given type across ALL investigations",
+    description=(
+        "Returns every IOC of the specified type across all investigations. "
+        "Useful for threat hunting: 'show me all IPs we've ever seen'."
+    ),
+)
+async def get_all_iocs_by_type(
+    ioc_type: str,
+    limit: int = Query(default=100, ge=1, le=1000),
+    db: TimescaleClient = Depends(get_db),
+):
+    if ioc_type not in _VALID_IOC_TYPES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid IOC type '{ioc_type}'. Valid: {sorted(_VALID_IOC_TYPES)}",
+        )
+    rows = await db._fetch(
+        """
+        SELECT id::TEXT, investigation_id::TEXT, ioc_type,
+               value, source_agent, context, first_seen
+        FROM iocs
+        WHERE ioc_type = $1
+        ORDER BY first_seen DESC
+        LIMIT $2
+        """,
+        ioc_type, limit,
+    )
+    total_row = await db._fetchrow(
+        "SELECT COUNT(*)::TEXT AS total FROM iocs WHERE ioc_type = $1",
+        ioc_type,
+    )
+    total = int(total_row["total"]) if total_row else 0
+    items = [IOCItem(**r) for r in rows]
+    return IOCListResponse(iocs=items, total=total)
 
 
 @router.get(
@@ -77,37 +143,3 @@ async def search_ioc(
     results = await db.search_ioc_history(request.value)
     items = [IOCHistoryItem(**r) for r in results]
     return IOCHistoryResponse(value=request.value, occurrences=items, total=len(items))
-
-
-@router.get(
-    "/all/type/{ioc_type}",
-    response_model=IOCListResponse,
-    summary="Get all IOCs of a given type across ALL investigations",
-    description=(
-        "Returns every IOC of the specified type across all investigations. "
-        "Useful for threat hunting: 'show me all IPs we've ever seen'."
-    ),
-)
-async def get_all_iocs_by_type(
-    ioc_type: str,
-    limit: int = Query(default=100, ge=1, le=1000),
-    db: TimescaleClient = Depends(get_db),
-):
-    if ioc_type not in _VALID_IOC_TYPES:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Invalid IOC type '{ioc_type}'. Valid: {sorted(_VALID_IOC_TYPES)}",
-        )
-    rows = await db._fetch(
-        """
-        SELECT id::TEXT, investigation_id::TEXT, ioc_type,
-               value, source_agent, context, first_seen
-        FROM iocs
-        WHERE ioc_type = $1
-        ORDER BY first_seen DESC
-        LIMIT $2
-        """,
-        ioc_type, limit,
-    )
-    items = [IOCItem(**r) for r in rows]
-    return IOCListResponse(iocs=items, total=len(items))

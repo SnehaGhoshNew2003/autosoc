@@ -1,9 +1,5 @@
-# api/routers/investigations.py
-#
-# GET  /api/v1/investigations          — list all investigations
-# GET  /api/v1/investigations/{id}     — get full investigation detail
-# DELETE /api/v1/investigations/{id}   — delete an investigation
-
+import json
+import logging
 from fastapi import APIRouter, Depends, HTTPException, Query
 from api.dependencies.database import get_db
 from api.models.schemas import (
@@ -15,6 +11,7 @@ from api.models.schemas import (
 from database.timescale_client import TimescaleClient
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 
 @router.get(
@@ -63,7 +60,10 @@ async def get_investigation(
         input_summary=inv.get("input_summary"),
         narrative=inv.get("narrative"),
         agent_runs=[
-            {k: v for k, v in r.items() if k != "result_json"}
+            {
+                **{k: v for k, v in r.items() if k != "result_json"},
+                "output": json.loads(r["result_json"]) if isinstance(r.get("result_json"), str) else r.get("result_json")
+            }
             for r in full["agent_runs"]
             if r["agent_name"] != "raw_input"
         ],

@@ -1,7 +1,3 @@
-# api/routers/health.py
-#
-# GET /health — liveness probe
-# GET /health/ready — readiness probe (checks DB)
 
 from fastapi import APIRouter, Depends
 from api.models.schemas import HealthResponse

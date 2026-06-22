@@ -200,6 +200,7 @@ async def run_pipeline(inputs: dict = None) -> dict:
         threat_intel=intel_result,
         malware=malware_result,
         timeline=timeline_result,
+        investigation_id=inv_id,
     )
     neo4j.close()
     logger.info("[main] AttackGraph done")

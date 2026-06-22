@@ -134,30 +134,33 @@ class Neo4jClient:
 
     def merge_event(
         self,
-        event_id:       str,
-        timestamp:      str,
-        stage:          str,
-        description:    str,
-        source:         str = "",
-        technique_id:   str = "",
-        technique_name: str = "",
-        confidence:     str = "low",
+        event_id:          str,
+        timestamp:         str,
+        stage:             str,
+        description:       str,
+        source:            str = "",
+        investigation_id:  str = "",
+        technique_id:      str = "",
+        technique_name:    str = "",
+        confidence:        str = "low",
     ):
         self._run(
             """
             MERGE (n:KillChainEvent {event_id: $event_id})
-            SET n.timestamp      = $timestamp,
-                n.stage          = $stage,
-                n.description    = $description,
-                n.source         = $source,
-                n.technique_id   = $technique_id,
-                n.technique_name = $technique_name,
-                n.confidence     = $confidence
+            SET n.timestamp         = $timestamp,
+                n.stage             = $stage,
+                n.description       = $description,
+                n.source            = $source,
+                n.investigation_id  = $investigation_id,
+                n.technique_id      = $technique_id,
+                n.technique_name    = $technique_name,
+                n.confidence        = $confidence
             """,
             {
                 "event_id": event_id, "timestamp": timestamp,
                 "stage": stage, "description": description,
-                "source": source, "technique_id": technique_id,
+                "source": source, "investigation_id": investigation_id,
+                "technique_id": technique_id,
                 "technique_name": technique_name, "confidence": confidence,
             }
         )
@@ -286,8 +289,21 @@ class Neo4jClient:
             "hashes":  self._run("MATCH (n:FileHash) RETURN n.hash AS hash"),
         }
 
-    def get_attack_path(self) -> list:
-        """Return full attack path ordered by timestamp."""
+    def get_attack_path(self, investigation_id: str = "") -> list:
+        """Return attack path for a specific investigation ordered by timestamp."""
+        if investigation_id:
+            result = self._run(
+                """
+                MATCH (e:KillChainEvent)
+                WHERE e.investigation_id = $inv_id OR e.investigationId = $inv_id
+                RETURN e.timestamp AS timestamp, e.stage AS stage,
+                       e.description AS description, e.technique_id AS technique_id
+                ORDER BY e.timestamp ASC
+                """,
+                {"inv_id": investigation_id}
+            )
+            if result:
+                return result
         return self._run(
             """
             MATCH (e:KillChainEvent)

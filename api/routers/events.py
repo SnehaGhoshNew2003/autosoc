@@ -1,8 +1,3 @@
-# api/routers/events.py
-#
-# GET /api/v1/events/{investigation_id}               — all kill-chain events
-# GET /api/v1/events/{investigation_id}/stage/{stage} — filter by kill-chain stage
-
 from fastapi import APIRouter, Depends, HTTPException
 from api.dependencies.database import get_db
 from api.models.schemas import EventListResponse, KillChainEventItem
@@ -87,7 +82,6 @@ async def get_mitre_coverage(
 
     events = await db.get_events(investigation_id)
 
-    # Build unique techniques map
     techniques: dict[str, dict] = {}
     stages_found: set[str] = set()
     for ev in events:
@@ -107,7 +101,6 @@ async def get_mitre_coverage(
                 techniques[tid]["stages"].add(stage)
                 stages_found.add(stage)
 
-    # Convert sets to lists for JSON serialization
     result = []
     for tid, info in techniques.items():
         result.append({
@@ -172,11 +165,10 @@ async def get_global_mitre_coverage(
         if inv_id:
             investigations.add(inv_id)
 
-    # Count unique investigations per technique
     for ev in events:
         tid = ev.get("technique_id")
         if tid and tid in techniques:
-            pass  # We simply report total occurrences
+            pass 
 
     result = []
     for tid, info in techniques.items():

@@ -1,17 +1,8 @@
-# api/models/schemas.py
-#
-# All Pydantic request and response models for the API.
-# Kept separate from the agent Pydantic models so the API
-# contract is independent of internal agent implementation.
-
 from __future__ import annotations
 
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 from pydantic import BaseModel, Field
-
-
-# ── Shared ────────────────────────────────────────────────────── #
 
 class StatusResponse(BaseModel):
     status: str
@@ -22,8 +13,6 @@ class ErrorResponse(BaseModel):
     error: str
     detail: Optional[str] = None
 
-
-# ── Pipeline ──────────────────────────────────────────────────── #
 
 class PipelineRequest(BaseModel):
     """
@@ -79,8 +68,6 @@ class PipelineStatusResponse(BaseModel):
     agent_statuses:   List[Dict[str, Any]]
 
 
-# ── Investigations ────────────────────────────────────────────── #
-
 class InvestigationSummary(BaseModel):
     id:            str
     created_at:    datetime
@@ -110,8 +97,6 @@ class InvestigationListResponse(BaseModel):
     investigations: List[InvestigationSummary]
     total:          int
 
-
-# ── IOCs ──────────────────────────────────────────────────────── #
 
 class IOCItem(BaseModel):
     id:               Optional[str]
@@ -151,8 +136,6 @@ class IOCHistoryResponse(BaseModel):
     total:        int
 
 
-# ── Events ────────────────────────────────────────────────────── #
-
 class KillChainEventItem(BaseModel):
     id:               Optional[str]
     investigation_id: Optional[str]
@@ -172,7 +155,6 @@ class EventListResponse(BaseModel):
     total:  int
 
 
-# ── Reports ───────────────────────────────────────────────────── #
 
 class ReportResponse(BaseModel):
     investigation_id:   str
@@ -182,8 +164,6 @@ class ReportResponse(BaseModel):
     consolidated_iocs:  Optional[List[str]]
     remediation_plan:   Optional[List[Dict[str, Any]]]
 
-
-# ── Debate ────────────────────────────────────────────────────── #
 
 class DebateVerdictResponse(BaseModel):
     investigation_id:     str
@@ -195,16 +175,43 @@ class DebateVerdictResponse(BaseModel):
     created_at:           Optional[datetime]
 
 
-# ── Graph ─────────────────────────────────────────────────────── #
-
 class GraphStatsResponse(BaseModel):
     investigation_id: str
     node_counts:      Dict[str, int]
     relationship_counts: Dict[str, int]
     attack_path:      List[Dict[str, Any]]
 
+class ConversationResponse(BaseModel):
+    id:               str
+    created_at:       datetime
+    updated_at:       datetime
+    title:            str
+    is_deleted:       bool
+    investigation_id: Optional[str]
 
-# ── Health ────────────────────────────────────────────────────── #
+
+class ConversationListResponse(BaseModel):
+    conversations: List[ConversationResponse]
+
+
+class MessageResponse(BaseModel):
+    id:         str
+    role:       str
+    content:    str
+    created_at: datetime
+
+
+class MessageListResponse(BaseModel):
+    messages: List[MessageResponse]
+
+
+class ChatMessageRequest(BaseModel):
+    content: str = Field(min_length=1, description="User message text")
+
+
+class TitleRequest(BaseModel):
+    first_message: str = Field(min_length=1, description="First user message for title generation")
+
 
 class HealthResponse(BaseModel):
     status:   str

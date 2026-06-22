@@ -16,9 +16,11 @@ from api.routers import (
     reports,
     graph,
     health,
+    chat,
 )
 from database.timescale_client import TimescaleClient
 from api.routers import database
+from graph.neo4j_client import Neo4jClient
 
 load_dotenv()
 
@@ -40,6 +42,7 @@ async def lifespan(app: FastAPI):
     logger.info("[AutoSOC] Starting up...")
     await db.connect()
     await db.create_schema()
+    await db.reclassify_all_iocs()
     app.state.db = db
     logger.info("[AutoSOC] Database ready")
     yield
@@ -67,7 +70,7 @@ app.add_middleware(
 )
 app.add_middleware(LoggingMiddleware)
 app.add_middleware(ErrorHandlerMiddleware)
-app.include_router(health.router,          tags=["Health"])
+app.include_router(health.router,          prefix="/api/v1",         tags=["Health"])
 app.include_router(pipeline.router,        prefix="/api/v1/pipeline",         tags=["Pipeline"])
 app.include_router(investigations.router,  prefix="/api/v1/investigations",   tags=["Investigations"])
 app.include_router(iocs.router,            prefix="/api/v1/iocs",             tags=["IOCs"])
@@ -75,3 +78,4 @@ app.include_router(events.router,          prefix="/api/v1/events",           ta
 app.include_router(reports.router,         prefix="/api/v1/reports",          tags=["Reports"])
 app.include_router(graph.router,           prefix="/api/v1/graph",            tags=["Graph"])
 app.include_router(database.router,        prefix="/api/v1/database",         tags=["Database"])
+app.include_router(chat.router,            prefix="/api/v1/chat",              tags=["Chat"])

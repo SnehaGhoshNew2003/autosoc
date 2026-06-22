@@ -26,20 +26,21 @@ class AttackGraphBuilder:
         threat_intel:    dict,
         malware:         dict,
         timeline:        dict,
+        investigation_id: str = "",
     ):
         """
         Main entry point. Writes all agent outputs to Neo4j in order:
         1. Nodes first (so relationships can reference them)
         2. Relationships second
         """
-        logger.info("[AttackGraph] Starting graph build...")
+        logger.info(f"[AttackGraph] Starting graph build for {investigation_id}...")
 
         self._write_threat_intel(threat_intel)
         self._write_malware(malware)
-        self._write_timeline(timeline)
-        self._write_timeline_relationships(timeline, threat_intel)
+        self._write_timeline(timeline, investigation_id)
+        self._write_timeline_relationships(timeline, threat_intel, investigation_id)
 
-        logger.info("[AttackGraph] Graph build complete")
+        logger.info(f"[AttackGraph] Graph build complete for {investigation_id}")
 
     def _write_threat_intel(self, data: dict):
         if data.get("_status") == "error":
@@ -128,7 +129,7 @@ class AttackGraphBuilder:
 
         logger.info("[AttackGraph] Malware written")
 
-    def _write_timeline(self, data: dict):
+    def _write_timeline(self, data: dict, investigation_id: str = ""):
         if data.get("_status") == "error":
             logger.warning("[AttackGraph] Skipping Timeline — agent errored")
             return
@@ -142,6 +143,7 @@ class AttackGraphBuilder:
                 stage=ev.get("stage", "unknown"),
                 description=ev.get("description", ""),
                 source=ev.get("source", ""),
+                investigation_id=investigation_id,
                 technique_id=ev.get("technique_id", ""),
                 technique_name=ev.get("technique_name", ""),
                 confidence=ev.get("confidence", "low"),
@@ -179,7 +181,7 @@ class AttackGraphBuilder:
 
         logger.info(f"[AttackGraph] Timeline written — {len(events)} events")
 
-    def _write_timeline_relationships(self, timeline: dict, threat_intel: dict):
+    def _write_timeline_relationships(self, timeline: dict, threat_intel: dict, investigation_id: str = ""):
         """Link timeline events to threat actors from intel."""
         if (timeline.get("_status") == "error" or
                 threat_intel.get("_status") == "error"):
