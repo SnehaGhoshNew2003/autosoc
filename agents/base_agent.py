@@ -4,118 +4,123 @@ import logging
 import re
 import os
 from dotenv import load_dotenv
-from crewai import LLM                         
-from tenacity import retry, stop_after_attempt, wait_exponential
+from crewai import Agent, Task, Crew, Process, LLM
+from tenacity import retry, stop_after_attempt
+from tenacity.wait import wait_base
 
 load_dotenv()
 logger = logging.getLogger(__name__)
 
+_CHAR_LIMIT = 8000  
+
+def _trim(text: str, limit: int = _CHAR_LIMIT) -> str:
+    if len(text) <= limit:
+        return text
+    head = int(limit * 0.6)
+    tail = limit - head
+    dropped = len(text) - limit
+    logger.warning(f"[Trim] Dropping {dropped} chars from middle of input")
+    return text[:head] + f"\n...[{dropped} chars omitted]...\n" + text[-tail:]
+
+def get_llm(temperature: float = 0.2) -> LLM:
+    return LLM(
+        model=os.getenv("GROQ_MODEL", "groq/llama-3.3-70b-versatile"),
+        api_key=os.getenv("GROQ_API_KEY"),
+        temperature=temperature,
+    )
+
+class _GroqRateLimitWait(wait_base):
+    def __call__(self, retry_state) -> float:
+        exc = retry_state.outcome.exception()
+        if exc:
+            s = str(exc)
+            m = re.search(r'try again in (\d+)m(\d+(?:\.\d+)?)s', s)
+            if m:
+                wait = int(m.group(1)) * 60 + float(m.group(2)) + 5
+                logger.warning(f"[RateLimit] Daily limit — sleeping {wait:.0f}s")
+                return wait
+            m = re.search(r'try again in (\d+(?:\.\d+)?)s', s)
+            if m:
+                wait = float(m.group(1)) + 3
+                logger.warning(f"[RateLimit] TPM — sleeping {wait:.1f}s")
+                return wait
+        return 40.0
 
 class BaseAgent:
-    def __init__(
-        self,
-        name: str,
-        system_prompt: str,
-        model: str = "gemini-3.5-pro",
-    ):
+    role:      str = "Generic Analyst"
+    goal:      str = "Analyze input and return structured results"
+    backstory: str = "You are a generic analysis agent."
+
+    def __init__(self, name, system_prompt, model=None, temperature=0.2, verbose=False):
         self.name = name
         self.system_prompt = system_prompt
-        self.llm = LLM(
-            model=model,
-            api_key=os.getenv("GEMINI_API_KEY"),
-            temperature=0.2,       
+        self.verbose = verbose
+        self._history: list[dict] = []
+        self.llm = get_llm(temperature=temperature) if model is None else LLM(
+            model=model, api_key=os.getenv("GROQ_API_KEY"), temperature=temperature,
+        )
+        self.agent = Agent(
+            role=self.role, goal=self.goal, backstory=self.backstory,
+            llm=self.llm, verbose=verbose, memory=False, allow_delegation=False,
         )
 
-        self._history: list[dict] = []
+    def _strip_json_fences(self, text):
+        m = re.search(r"```(?:json)?\s*([\s\S]*?)```", text)
+        return m.group(1).strip() if m else text.strip()
 
-    def _strip_json_fences(self, text: str) -> str:
-        """Strip markdown code fences Gemini sometimes wraps around JSON."""
-        match = re.search(r"```(?:json)?\s*([\s\S]*?)```", text)
-        return match.group(1).strip() if match else text.strip()
-
-    def _build_messages(self, user_content: str) -> list[dict]:
-        """
-        Assemble the full message list for this call:
-        system prompt  +  running history  +  new user turn.
-        CrewAI LLM.call() accepts OpenAI-style message dicts.
-        """
-        messages = [{"role": "system", "content": self.system_prompt}]
-        messages.extend(self._history)
-        messages.append({"role": "user", "content": user_content})
-        return messages
-
-    def _parse_response(self, raw: str) -> tuple[any, bool]:
-        """
-        Try to parse raw text as JSON.
-        Returns (parsed_value, is_json).
-        """
+    def _parse_response(self, raw):
         clean = self._strip_json_fences(raw)
         try:
             return json.loads(clean), True
         except json.JSONDecodeError:
             return raw, False
 
-    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10))
+    def _build_task_description(self, evidence):
+        if not self._history:
+            return f"{self.system_prompt}\n\nINPUT:\n{_trim(evidence)}"
+        history_block = "\n".join(
+            f"[{m['role'].upper()}]: {m['content']}" for m in self._history[-4:]
+        )
+        return (
+            f"{self.system_prompt}\n\n"
+            f"PREVIOUS CONTEXT:\n{history_block}\n\n"
+            f"NEW INPUT:\n{_trim(evidence)}"
+        )
+
+    def _make_crew(self, task):
+        return Crew(agents=[self.agent], tasks=[task],
+                    process=Process.sequential, verbose=self.verbose)
+
+    @retry(stop=stop_after_attempt(5), wait=_GroqRateLimitWait())
     async def analyze(self, evidence: str) -> dict:
-        """
-        Send evidence through chat history → get structured JSON response.
-        Maintains conversation context across multiple calls.
-        """
         if not evidence or not evidence.strip():
-            return {
-                "agent": self.name,
-                "data": None,
-                "status": "error",
-                "error": "Empty input",
-            }
+            return {"agent": self.name, "data": None,
+                    "status": "error", "error": "Empty input"}
+        task = Task(
+            description=self._build_task_description(evidence),
+            expected_output="A valid JSON object. No markdown fences, no explanation — JSON only.",
+            agent=self.agent,
+        )
+        crew = self._make_crew(task)
+        crew_output = await asyncio.get_running_loop().run_in_executor(None, crew.kickoff)
+        raw = str(crew_output)
+        self._history.append({"role": "user", "content": evidence})
+        self._history.append({"role": "assistant", "content": raw})
+        parsed, is_json = self._parse_response(raw)
+        return {"agent": self.name, "data": parsed, "status": "complete", "is_json": is_json}
 
-        try:
-            messages = self._build_messages(evidence)
-            loop = asyncio.get_event_loop()
-            raw: str = await loop.run_in_executor(
-                None,
-                lambda: self.llm.call(messages) 
-            )
-            self._history.append({"role": "user",      "content": evidence})
-            self._history.append({"role": "assistant",  "content": raw})
-
-            parsed, is_json = self._parse_response(raw)
-            return {
-                "agent":  self.name,
-                "data":   parsed,
-                "status": "complete",
-                "json":   is_json, 
-            }
-
-        except Exception as e:
-            logger.error(f"[{self.name}] analyze() failed: {e}")
-            raise 
-
-    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10))
+    @retry(stop=stop_after_attempt(5), wait=_GroqRateLimitWait())
     async def query(self, prompt: str) -> str:
-        """
-        One-shot query — NO chat history, NO side effects.
-        Good for quick lookups from other agents.
-        """
         if not prompt or not prompt.strip():
             return "ERROR: Empty prompt"
-
-        try:
-            messages = [
-                {"role": "system", "content": self.system_prompt},
-                {"role": "user",   "content": prompt},
-            ]
-            loop = asyncio.get_event_loop()
-            raw: str = await loop.run_in_executor(
-                None,
-                lambda: self.llm.call(messages)
-            )
-            return raw
-
-        except Exception as e:
-            logger.error(f"[{self.name}] query() failed: {e}")
-            raise
+        task = Task(
+            description=f"{self.system_prompt}\n\nQUESTION:\n{_trim(prompt)}",
+            expected_output="A clear, direct answer.",
+            agent=self.agent,
+        )
+        crew = self._make_crew(task)
+        crew_output = await asyncio.get_running_loop().run_in_executor(None, crew.kickoff)
+        return str(crew_output)
 
     def reset_chat(self):
-        """Clear conversation history between investigations."""
         self._history = []

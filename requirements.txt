@@ -1,3 +1,22 @@
-crewai 
-python-dotenv 
-tenacity
+# Core Agent & Operations Infrastructure
+crewai[litellm]>=0.80.0
+litellm
+pydantic>=2.7.0
+python-dotenv>=1.0.0
+tenacity>=8.2.0
+groq>=0.4.0
+
+# Database Connectivity
+neo4j>=5.0.0
+
+# Testing Framework & Async Support
+pytest>=8.1.1
+pytest-asyncio>=0.23.6
+
+# ── Relational / TimescaleDB async stack ──────────────────────────────── #
+asyncpg>=0.29.0
+
+# ----------Fastapi-------------------------
+fastapi>=0.110.0
+uvicorn[standard]>=0.27.0
+starlette
