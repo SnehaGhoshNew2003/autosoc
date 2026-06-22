@@ -4,6 +4,7 @@ litellm
 pydantic>=2.7.0
 python-dotenv>=1.0.0
 tenacity>=8.2.0
+groq>=0.4.0
 
 # Database Connectivity
 neo4j>=5.0.0

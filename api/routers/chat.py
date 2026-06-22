@@ -14,6 +14,15 @@ router = APIRouter()
 logger = logging.getLogger(__name__)
 
 
+def _get_model() -> str:
+    model = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
+    # Strip common provider prefixes that native Groq SDK doesn't expect
+    for prefix in ("groq/", "ollama/", "openai/"):
+        if model.startswith(prefix):
+            model = model[len(prefix):]
+    return model
+
+
 def _get_groq():
     try:
         from groq import AsyncGroq
@@ -29,10 +38,10 @@ def _truncate(text: str, max_words: int = 5) -> str:
     return " ".join(words[:max_words]) if words else "New Chat"
 
 
-async def _generate_title(client, first_message: str) -> str:
+async def _generate_title(client, first_message: str, model: str) -> str:
     try:
         resp = await client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
+            model=model,
             messages=[
                 {
                     "role": "system",
@@ -58,10 +67,11 @@ async def _stream_chat_response(
     client,
     messages: list[dict],
     on_chunk=None,
+    model: str = "llama-3.3-70b-versatile",
 ) -> str:
     full_text = ""
     stream = await client.chat.completions.create(
-        model="llama-3.3-70b-versatile",
+        model=model,
         messages=messages,
         stream=True,
         temperature=0.4,
@@ -216,6 +226,8 @@ async def send_message(
         groq_messages.append({"role": m["role"], "content": m["content"]})
 
     client = _get_groq()
+    model = _get_model()
+    logger.info(f"[Chat] Using Groq model: {model}")
 
     async def event_stream():
         assistant_text = ""
@@ -225,12 +237,12 @@ async def send_message(
                 assistant_text += chunk
                 yield f"data: {json.dumps({'content': chunk})}\n\n"
 
-            full = await _stream_chat_response(client, groq_messages)
+            full = await _stream_chat_response(client, groq_messages, model=model)
             yield f"data: {json.dumps({'content': full})}\n\n"
             await db.add_chat_message(conversation_id, "assistant", full)
             user_msgs = [m for m in history if m["role"] == "user"]
             if len(user_msgs) <= 1 and conv["title"] == "New Chat":
-                title = await _generate_title(client, user_content)
+                title = await _generate_title(client, user_content, model=model)
                 await db.update_conversation_title(conversation_id, title)
 
             yield "data: [DONE]\n\n"
