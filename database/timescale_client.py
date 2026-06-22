@@ -4,6 +4,7 @@ import logging
 import asyncio
 from datetime import datetime, timezone
 from typing import Optional
+from urllib.parse import urlparse
 
 import asyncpg
 from dotenv import load_dotenv
@@ -41,6 +42,26 @@ class TimescaleClient:
                 f":{os.getenv('TIMESCALE_PORT')}"
                 f"/{os.getenv('TIMESCALE_DB')}"
             )
+        self._database_name = self._parse_database_name()
+
+    def _parse_database_name(self) -> str:
+        """Extract database name from DSN."""
+        # Prefer TIMESCALE_DB env var if set
+        timescale_db = os.getenv("TIMESCALE_DB")
+        if timescale_db:
+            return timescale_db
+        if not self._dsn:
+            return "unknown"
+        try:
+            parsed = urlparse(self._dsn)
+            dbname = parsed.path.lstrip("/")
+            return dbname if dbname else "unknown"
+        except Exception:
+            return "unknown"
+
+    def get_database_name(self) -> str:
+        """Return the configured database name."""
+        return self._database_name
 
     async def connect(self, min_size: int = 2, max_size: int = 10):
         """

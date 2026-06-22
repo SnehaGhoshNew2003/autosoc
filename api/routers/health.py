@@ -8,9 +8,9 @@ router = APIRouter()
 
 
 @router.get("/health", response_model=HealthResponse, summary="Liveness probe")
-async def health():
+async def health(db: TimescaleClient = Depends(get_db)):
     """Returns 200 if the API process is alive."""
-    return HealthResponse(status="ok", database="unknown")
+    return HealthResponse(status="ok", database=db.get_database_name())
 
 
 @router.get("/health/ready", response_model=HealthResponse, summary="Readiness probe")
